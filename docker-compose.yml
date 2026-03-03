@@ -1,0 +1,38 @@
+services:
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: finguard-backend
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    volumes:
+      - chroma_data:/app/data/chromadb
+      - embedding_cache:/app/data/embeddings
+      - reranker_cache:/app/data/rerankers
+      - hf_cache:/app/data/hf
+    env_file:
+      - ./backend/.env
+    environment:
+      - PYTHONUNBUFFERED=1
+      - HF_HOME=/app/data/hf
+      - TOKENIZERS_PARALLELISM=false
+      - OMP_NUM_THREADS=2
+      - MKL_NUM_THREADS=2
+    healthcheck:
+      test: [ "CMD", "curl", "-f", "http://localhost:8000/health" ]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+
+volumes:
+  chroma_data:
+    driver: local
+  embedding_cache:
+    driver: local
+  reranker_cache:
+    driver: local
+  hf_cache:
+    driver: local
