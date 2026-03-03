@@ -19,7 +19,7 @@ class Settings(BaseSettings):
     upload_dir: str = "/app/data/uploads"
 
     # ─── CORS & Security ─────────────────────────────
-    cors_origins: str = "http://localhost:3000"
+    cors_origins: str = "http://localhost:3000,https://finguard.projects.emrecanik.com"
     api_jwt_secret: str = "super-secret-finguard-key-change-in-prod"
 
     # ─── Embedding ───────────────────────────────────
