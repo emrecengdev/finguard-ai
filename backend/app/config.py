@@ -18,8 +18,9 @@ class Settings(BaseSettings):
     # ─── Uploads ─────────────────────────────────────
     upload_dir: str = "/app/data/uploads"
 
-    # ─── CORS ────────────────────────────────────────
+    # ─── CORS & Security ─────────────────────────────
     cors_origins: str = "http://localhost:3000"
+    api_jwt_secret: str = "super-secret-finguard-key-change-in-prod"
 
     # ─── Embedding ───────────────────────────────────
     embedding_model: str = "intfloat/multilingual-e5-small"

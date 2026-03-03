@@ -9,10 +9,12 @@ import logging
 import asyncio
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, UploadFile, File, Form, HTTPException
+from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Depends, Query, Security
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from sse_starlette.sse import EventSourceResponse
+import jwt
 
 from app.config import get_settings
 from app.rag import (
@@ -119,6 +121,37 @@ class DeleteResponse(BaseModel):
     filename: str
     deleted_chunks: int
     status: str
+
+
+# ─── Auth Middleware ───────────────────────────────────────────────────
+
+security = HTTPBearer(auto_error=False)
+
+async def verify_jwt_token(
+    credentials: HTTPAuthorizationCredentials | None = Security(security),
+    token: str | None = Query(None)
+):
+    """
+    Verifies JWT token. Acceptable via Authorization Bearer header OR ?token= query.
+    EventSource (SSE) running in the browser only supports query parameters natively.
+    """
+    actual_token = token
+    if credentials:
+        actual_token = credentials.credentials
+        
+    if not actual_token:
+        raise HTTPException(status_code=401, detail="Missing authentication token")
+        
+    settings = get_settings()
+    try:
+        payload = jwt.decode(actual_token, settings.api_jwt_secret, algorithms=["HS256"])
+        if payload.get("sub") != "finguard-frontend":
+            raise HTTPException(status_code=403, detail="Invalid token subject")
+        return payload
+    except jwt.ExpiredSignatureError:
+        raise HTTPException(status_code=401, detail="Token expired")
+    except jwt.InvalidTokenError:
+        raise HTTPException(status_code=401, detail="Invalid token")
 
 
 # ─── Routes ──────────────────────────────────────────────────────────
@@ -240,7 +273,7 @@ async def remove_document(filename: str):
 
 
 @app.post("/chat", response_model=ChatResponse)
-async def chat(request: ChatRequest):
+async def chat(request: ChatRequest, user: dict = Depends(verify_jwt_token)):
     """
     Send a message to the multi-agent pipeline.
     Returns the final response with agent thinking steps and sources.
@@ -275,7 +308,7 @@ async def chat(request: ChatRequest):
 
 
 @app.post("/chat/stream")
-async def chat_stream(request: ChatRequest):
+async def chat_stream(request: ChatRequest, user: dict = Depends(verify_jwt_token)):
     """
     SSE streaming endpoint for the chat pipeline.
     Streams agent steps as they execute, then the final response.

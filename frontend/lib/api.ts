@@ -1,6 +1,6 @@
 /**
  * FinGuard AI — API Client
- * Handles communication with the FastAPI backend.
+ * Handles communication with the FastAPI backend via Next.js JWT Handshake.
  */
 
 const API_BASE = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
@@ -51,12 +51,30 @@ export interface UploadPdfOptions {
     ocrEngine?: string;
 }
 
+// ─── Auth Helper ────────────────────────────────────────────────────
+
+async function getAuthToken(): Promise<string> {
+    try {
+        const res = await fetch("/api/auth/token");
+        if (!res.ok) throw new Error("Failed to fetch token");
+        const data = await res.json();
+        return data.token;
+    } catch (e) {
+        console.error("JWT Handshake error:", e);
+        return "";
+    }
+}
+
 // ─── API Functions ──────────────────────────────────────────────────
 
 export async function sendMessage(message: string, sessionId: string = "default"): Promise<ChatResponse> {
+    const token = await getAuthToken();
     const res = await fetch(`${API_BASE}/chat`, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: {
+            "Content-Type": "application/json",
+            "Authorization": `Bearer ${token}`
+        },
         body: JSON.stringify({ message, session_id: sessionId }),
     });
 
@@ -75,9 +93,13 @@ export async function streamMessage(
     onResponse: (data: { response: string; guardrail_passed: boolean; sources: ChatSource[] }) => void,
     onError: (error: string) => void,
 ): Promise<void> {
+    const token = await getAuthToken();
     const res = await fetch(`${API_BASE}/chat/stream`, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: {
+            "Content-Type": "application/json",
+            "Authorization": `Bearer ${token}`
+        },
         body: JSON.stringify({ message, session_id: sessionId }),
     });
 
@@ -102,14 +124,12 @@ export async function streamMessage(
 
         for (const line of lines) {
             if (line.startsWith("event: ")) {
-                // next line should be data:
                 continue;
             }
             if (line.startsWith("data: ")) {
                 const data = line.slice(6);
                 try {
                     const parsed = JSON.parse(data);
-                    // Determine event type from the parsed data shape
                     if (parsed.node) {
                         onStep(parsed as AgentStep);
                     } else if (parsed.response !== undefined) {
@@ -133,8 +153,12 @@ export async function uploadPdf(file: File, options: UploadPdfOptions = {}): Pro
         formData.append("ocr_engine", options.ocrEngine || "unknown");
     }
 
+    const token = await getAuthToken();
     const res = await fetch(`${API_BASE}/upload_pdf`, {
         method: "POST",
+        headers: {
+            "Authorization": `Bearer ${token}`
+        },
         body: formData,
     });
 
@@ -147,7 +171,10 @@ export async function uploadPdf(file: File, options: UploadPdfOptions = {}): Pro
 }
 
 export async function getDocuments(): Promise<DocumentInfo[]> {
-    const res = await fetch(`${API_BASE}/documents`);
+    const token = await getAuthToken();
+    const res = await fetch(`${API_BASE}/documents`, {
+        headers: { "Authorization": `Bearer ${token}` }
+    });
 
     if (!res.ok) {
         const err = await res.json().catch(() => ({ detail: "Unknown error" }));
@@ -158,8 +185,10 @@ export async function getDocuments(): Promise<DocumentInfo[]> {
 }
 
 export async function deleteDocument(filename: string): Promise<void> {
+    const token = await getAuthToken();
     const res = await fetch(`${API_BASE}/documents/${encodeURIComponent(filename)}`, {
         method: "DELETE",
+        headers: { "Authorization": `Bearer ${token}` }
     });
 
     if (!res.ok) {
@@ -170,7 +199,10 @@ export async function deleteDocument(filename: string): Promise<void> {
 
 export async function healthCheck(): Promise<boolean> {
     try {
-        const res = await fetch(`${API_BASE}/health`);
+        const token = await getAuthToken();
+        const res = await fetch(`${API_BASE}/health`, {
+            headers: { "Authorization": `Bearer ${token}` }
+        });
         return res.ok;
     } catch {
         return false;
