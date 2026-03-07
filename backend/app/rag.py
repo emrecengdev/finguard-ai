@@ -296,9 +296,72 @@ def _get_reranker() -> CrossEncoder:
         )
     else:
         fp32_file = _find_fp32_onnx_file(model_dir)
-        if fp32_file is None:
+        onnx_file = fp32_file or ""
+
+        if backend == "onnx-int8":
+            quantized_file = _find_quantized_onnx_file(
+                model_dir, quant_config, allow_fallback=False
+            )
+            if quantized_file is None and fp32_file is not None:
+                try:
+                    logger.info(
+                        "Reranker INT8 file not found. Exporting dynamic quantized ONNX "
+                        f"(config={quant_config})..."
+                    )
+                    onnx_model = CrossEncoder(
+                        str(model_dir),
+                        backend="onnx",
+                        max_length=settings.reranker_max_length,
+                        trust_remote_code=settings.reranker_trust_remote_code,
+                        model_kwargs={"file_name": fp32_file},
+                    )
+                    export_dynamic_quantized_onnx_model(
+                        model=onnx_model,
+                        quantization_config=quant_config,
+                        model_name_or_path=str(model_dir),
+                        push_to_hub=False,
+                        file_suffix=f"qint8_{quant_config}",
+                    )
+                    quantized_file = _find_quantized_onnx_file(
+                        model_dir, quant_config, allow_fallback=False
+                    )
+                except Exception as e:
+                    logger.warning(
+                        "Reranker INT8 quantization failed. Falling back to available ONNX file. Error: %s",
+                        str(e),
+                    )
+
+            if quantized_file is None:
+                quantized_file = _find_quantized_onnx_file(
+                    model_dir, quant_config, allow_fallback=True
+                )
+
+            if quantized_file:
+                onnx_file = quantized_file
+                if quant_config not in quantized_file:
+                    logger.warning(
+                        "Reranker INT8 exact quantization '%s' unavailable; using '%s' fallback.",
+                        quant_config,
+                        quantized_file,
+                    )
+            elif fp32_file:
+                selected_backend = "onnx"
+
+        elif not onnx_file:
+            quantized_fallback = _find_quantized_onnx_file(
+                model_dir, quant_config, allow_fallback=True
+            )
+            if quantized_fallback:
+                logger.warning(
+                    "No FP32 ONNX reranker file found; using quantized fallback '%s'.",
+                    quantized_fallback,
+                )
+                onnx_file = quantized_fallback
+                selected_backend = "onnx-int8"
+
+        if not onnx_file:
             logger.warning(
-                "No ONNX reranker file found under local model dir. Falling back to torch backend."
+                "No compatible ONNX reranker file found under local model dir. Falling back to torch backend."
             )
             selected_backend = "torch"
             _reranker = CrossEncoder(
@@ -307,54 +370,6 @@ def _get_reranker() -> CrossEncoder:
                 trust_remote_code=settings.reranker_trust_remote_code,
             )
         else:
-            onnx_file = fp32_file
-            if backend == "onnx-int8":
-                quantized_file = _find_quantized_onnx_file(
-                    model_dir, quant_config, allow_fallback=False
-                )
-                if quantized_file is None:
-                    try:
-                        logger.info(
-                            "Reranker INT8 file not found. Exporting dynamic quantized ONNX "
-                            f"(config={quant_config})..."
-                        )
-                        onnx_model = CrossEncoder(
-                            str(model_dir),
-                            backend="onnx",
-                            max_length=settings.reranker_max_length,
-                            trust_remote_code=settings.reranker_trust_remote_code,
-                            model_kwargs={"file_name": fp32_file},
-                        )
-                        export_dynamic_quantized_onnx_model(
-                            model=onnx_model,
-                            quantization_config=quant_config,
-                            model_name_or_path=str(model_dir),
-                            push_to_hub=False,
-                            file_suffix=f"qint8_{quant_config}",
-                        )
-                        quantized_file = _find_quantized_onnx_file(
-                            model_dir, quant_config, allow_fallback=False
-                        )
-                    except Exception as e:
-                        logger.warning(
-                            "Reranker INT8 quantization failed. Falling back to ONNX FP32. Error: %s",
-                            str(e),
-                        )
-                if quantized_file is None:
-                    quantized_file = _find_quantized_onnx_file(
-                        model_dir, quant_config, allow_fallback=True
-                    )
-                if quantized_file:
-                    onnx_file = quantized_file
-                    if quant_config not in quantized_file:
-                        logger.warning(
-                            "Reranker INT8 exact quantization '%s' unavailable; using '%s' fallback.",
-                            quant_config,
-                            quantized_file,
-                        )
-                else:
-                    selected_backend = "onnx"
-
             selected_onnx_file = onnx_file
             try:
                 _reranker = CrossEncoder(
@@ -749,8 +764,6 @@ def retrieve(
     top_n = top_n or settings.rag_rerank_top_n
 
     collection = _get_collection()
-    reranker = _get_reranker()
-
     # ── Step 1: Vector search ──
     query_kwargs: dict = {
         "query_texts": [query],
@@ -814,8 +827,29 @@ def retrieve(
         return []
 
     # ── Step 4: Cross-encoder reranking ──
-    query_doc_pairs = [[query, c["content"]] for c in candidates]
-    rerank_scores = reranker.predict(query_doc_pairs)
+    try:
+        reranker = _get_reranker()
+        query_doc_pairs = [[query, c["content"]] for c in candidates]
+        rerank_scores = reranker.predict(query_doc_pairs)
+    except Exception as e:
+        logger.warning(
+            "Reranker unavailable during retrieval. Falling back to RRF ordering. Error: %s",
+            str(e),
+        )
+        fallback_results = []
+        for candidate in candidates:
+            fallback_results.append({
+                "content": candidate["content"],
+                "source": candidate["source"],
+                "page": candidate["page"],
+                "article": candidate.get("article", ""),
+                "vector_distance": candidate.get("vector_distance", 1.0),
+                "rerank_score": round(candidate["rrf_score"], 4),
+                "rrf_score": round(candidate["rrf_score"], 4),
+            })
+
+        fallback_results.sort(key=lambda x: x["rrf_score"], reverse=True)
+        return fallback_results[:top_n]
 
     scored_results = []
     for i, candidate in enumerate(candidates):
@@ -878,7 +912,7 @@ def delete_document(filename: str) -> dict:
 
     if ids_to_delete:
         collection.delete(ids=ids_to_delete)
-        _build_bm25_index()  # Rebuild after deletion
+        _build_bm25_index()
 
     return {
         "filename": filename,

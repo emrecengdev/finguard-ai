@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useCallback, useRef } from "react";
+import { useState, useCallback, useEffect, useRef } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import {
   FileText,
@@ -8,14 +8,12 @@ import {
   Trash2,
   Loader2,
   CloudUpload,
-  CircleDot,
   AlertCircle,
   CheckCircle2,
   Sparkles,
-  Menu,
   Plus,
-  Crown,
-  Database,
+  BookOpen,
+  ChevronDown,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
@@ -23,11 +21,29 @@ import { uploadPdf, deleteDocument, type DocumentInfo } from "@/lib/api";
 import { extractPdfTextWithScribe } from "@/lib/ocr";
 import { t } from "@/lib/i18n";
 import { useAppStore } from "@/store/useAppStore";
+import { ShinyButton } from "@/components/ui/shiny-button";
+import { ShineBorder } from "@/components/ui/shine-border";
+
+// ─── Sample Document Pool ───────────────────────────────────────
+const SAMPLE_DOCS = [
+  { id: "isg", name: "İSG Kanunu", file: "isg-kanunu.pdf", desc: "6331 Sayılı İş Sağlığı ve Güvenliği", pages: 28, tone: "full" },
+  { id: "kvkk", name: "KVKK", file: "kkvk.pdf", desc: "6698 Sayılı Kişisel Verilerin Korunması", pages: 21, tone: "full" },
+  { id: "sgk", name: "SGK / GSS Kanunu", file: "sgk-gss-kanunu.pdf", desc: "5510 Sayılı Sosyal Sigortalar", pages: 242, tone: "full" },
+  { id: "sendikalar", name: "Sendikalar Kanunu", file: "sendikalar-toplu-is-sozlesmesi-kanunu.pdf", desc: "6356 Sayılı Sendikalar ve Toplu İş", pages: 39, tone: "full" },
+  { id: "borclar", name: "Borçlar Kanunu", file: "turk-borclar-kanunu.pdf", desc: "6098 Sayılı Türk Borçlar Kanunu", pages: 134, tone: "full" },
+  { id: "tuketici", name: "Tüketici Koruma", file: "tuketici-koruma-kanunu.pdf", desc: "6502 Sayılı Tüketici Hakları", pages: 53, tone: "full" },
+  { id: "sermaye", name: "Sermaye Piyasası", file: "semaye-piyasasi-kanunu.pdf", desc: "6362 Sayılı Sermaye Piyasası", pages: 113, tone: "full" },
+  { id: "ticaret", name: "Ticaret Kanunu", file: "turk-ticaret-kanunu.pdf", desc: "6102 Sayılı Türk Ticaret Kanunu", pages: 409, tone: "full" },
+  { id: "is_kanunu", name: "İş Kanunu Özeti", file: "is_kanunu_ozet.pdf", desc: "4857 Sayılı İş Kanunu", pages: 1, tone: "summary" },
+  { id: "bankacilik", name: "Bankacılık Mevzuat Özeti", file: "bankacilik_mevzuat.pdf", desc: "BDDK Düzenlemeleri", pages: 1, tone: "summary" },
+];
 
 interface SidebarProps {
   documents: DocumentInfo[];
   onDocumentsChange: () => void;
   isBackendOnline: boolean;
+  selectedDocumentFilename: string | null;
+  onSelectDocument: (document: DocumentInfo) => void;
 }
 
 const spring = { type: "spring" as const, stiffness: 320, damping: 28 };
@@ -36,6 +52,8 @@ export function Sidebar({
   documents,
   onDocumentsChange,
   isBackendOnline,
+  selectedDocumentFilename,
+  onSelectDocument,
 }: SidebarProps) {
   const locale = useAppStore((s) => s.locale);
   const [isUploading, setIsUploading] = useState(false);
@@ -44,7 +62,11 @@ export function Sidebar({
   const [uploadError, setUploadError] = useState<string | null>(null);
   const [uploadSuccess, setUploadSuccess] = useState<string | null>(null);
   const [uploadStatus, setUploadStatus] = useState(t("upload.processing", locale));
+  const [poolOpen, setPoolOpen] = useState(true);
+  const [addingFromPool, setAddingFromPool] = useState<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const uploadZoneRef = useRef<HTMLDivElement>(null);
+  const samplePoolRef = useRef<HTMLDivElement>(null);
 
   const handleUpload = useCallback(
     async (files: FileList | null) => {
@@ -119,10 +141,36 @@ export function Sidebar({
     (e: React.DragEvent) => {
       e.preventDefault();
       setIsDragOver(false);
+      if (!isBackendOnline) return;
       handleUpload(e.dataTransfer.files);
     },
-    [handleUpload]
+    [handleUpload, isBackendOnline]
   );
+
+  const openUploadPicker = useCallback(() => {
+    if (!isBackendOnline) return;
+    fileInputRef.current?.click();
+  }, [isBackendOnline]);
+
+  useEffect(() => {
+    const handleUploadIntent = () => {
+      uploadZoneRef.current?.scrollIntoView({ behavior: "smooth", block: "center" });
+      openUploadPicker();
+    };
+
+    const handleSamplePoolIntent = () => {
+      setPoolOpen(true);
+      samplePoolRef.current?.scrollIntoView({ behavior: "smooth", block: "center" });
+    };
+
+    window.addEventListener("finguard:open-upload", handleUploadIntent);
+    window.addEventListener("finguard:open-sample-pool", handleSamplePoolIntent);
+
+    return () => {
+      window.removeEventListener("finguard:open-upload", handleUploadIntent);
+      window.removeEventListener("finguard:open-sample-pool", handleSamplePoolIntent);
+    };
+  }, [openUploadPicker]);
 
   return (
     <div className="flex h-full flex-col px-4 py-6">
@@ -137,24 +185,111 @@ export function Sidebar({
             FinGuard AI
           </span>
         </div>
-        <button className="text-slate-400 dark:text-[#8e8c95] transition-colors hover:text-slate-800 dark:hover:text-white lg:hidden">
-          <Menu size={18} />
-        </button>
+        <span className={`rounded-full px-2 py-1 text-[10px] font-semibold uppercase tracking-wider ${
+          isBackendOnline
+            ? "bg-emerald-500/10 text-emerald-600 dark:text-emerald-400"
+            : "bg-rose-500/10 text-rose-600 dark:text-rose-400"
+        }`}>
+          {isBackendOnline ? t("status.online", locale) : t("status.offline", locale)}
+        </span>
       </div>
 
       {/* ── New Chat Button ──────────────────────────────── */}
-      <button
-        className="mb-8 flex w-full shrink-0 items-center justify-between gap-3 rounded-xl border border-black/5 dark:border-white/[0.02] bg-white/60 dark:bg-[#0f172a] p-3 text-[14px] font-medium text-slate-700 dark:text-[#e0e0e0] transition-colors hover:bg-white dark:hover:bg-[#1e293b]"
+      <ShinyButton
+        className="mb-8 w-full shrink-0 !px-4 !py-3 rounded-xl bg-white/60 dark:bg-[#0f172a] hover:bg-white dark:hover:bg-[#1e293b]"
         onClick={() => window.location.reload()}
       >
-        <div className="flex items-center gap-3">
-          <Plus size={16} className="text-slate-500 dark:text-[#a19fad]" />
-          <span>New Chat</span>
+        <div className="flex w-full items-center justify-between">
+          <div className="flex items-center gap-3">
+            <Plus size={16} className="text-slate-500 dark:text-[#a19fad]" />
+            <span className="capitalize">New Chat</span>
+          </div>
+          <span className="text-[10px] font-mono text-slate-400 dark:text-[#6b6975] bg-slate-100 dark:bg-[#121117] px-2 py-0.5 rounded-md border border-black/5 dark:border-white/[0.02]">⌘N</span>
         </div>
-        <span className="text-[10px] font-mono text-slate-400 dark:text-[#6b6975] bg-slate-100 dark:bg-[#121117] px-2 py-0.5 rounded-md border border-black/5 dark:border-white/[0.02]">⌘N</span>
-      </button>
+      </ShinyButton>
 
-      {/* ── Scrollable Document List & Upload ─────────────── */}
+      {/* ── Fixed Upload Action ─────────────────────────── */}
+      <div className="mb-4 shrink-0 px-1">
+        <motion.div
+          ref={uploadZoneRef}
+          onDragOver={(e) => {
+            e.preventDefault();
+            if (!isBackendOnline) return;
+            setIsDragOver(true);
+          }}
+          onDragLeave={() => setIsDragOver(false)}
+          onDrop={handleDrop}
+          whileTap={{ scale: 0.985 }}
+          className={`group relative flex w-full cursor-pointer flex-col items-center justify-center gap-1.5 overflow-hidden rounded-[14px] p-3.5 text-center transition-all duration-200 ${isDragOver
+            ? "bg-emerald-500/10 dark:bg-primary/10"
+            : "bg-white/60 hover:bg-white dark:bg-[#0f172a]/50 dark:hover:bg-[#0f172a]"
+            }`}
+          onClick={() => {
+            if (!isBackendOnline) return;
+            openUploadPicker();
+          }}
+        >
+          <ShineBorder
+            className="pointer-events-none opacity-50 transition-opacity duration-300 group-hover:opacity-100"
+            shineColor={["#10b981", "#3b82f6", "#0ea5e9"]}
+          />
+          <input
+            ref={fileInputRef}
+            type="file"
+            accept=".pdf"
+            className="hidden"
+            onChange={(e) => handleUpload(e.target.files)}
+          />
+
+          {isUploading ? (
+            <div className="flex flex-col items-center gap-1.5 py-0.5">
+              <Loader2 className="size-4.5 animate-spin text-emerald-500 dark:text-primary" />
+              <span className="text-[10px] font-medium text-slate-500 dark:text-[#8e8c95]">{uploadStatus}</span>
+            </div>
+          ) : (
+            <div className="flex flex-col items-center gap-1 py-0.5">
+              <div className={`flex size-7 items-center justify-center rounded-lg transition-colors ${isDragOver ? "bg-emerald-100 text-emerald-600 dark:bg-primary/20 dark:text-primary" : "bg-slate-100 text-slate-400 group-hover:text-slate-600 dark:bg-[#1e293b] dark:text-slate-400 dark:group-hover:text-slate-200"}`}>
+                {isDragOver ? <CloudUpload size={15} /> : <Upload size={15} />}
+              </div>
+              <span className="text-[11px] font-medium text-slate-700 dark:text-[#d1d0d5]">
+                {isBackendOnline ? t("upload.title", locale) : t("status.offline", locale)}
+              </span>
+              <span className="text-[9px] text-slate-400 dark:text-[#6b6975]">
+                {isBackendOnline
+                  ? t("upload.hint", locale)
+                  : "Backend unavailable. Upload actions are paused."}
+              </span>
+            </div>
+          )}
+        </motion.div>
+
+        <AnimatePresence>
+          {uploadError && (
+            <motion.div
+              initial={{ opacity: 0, height: 0 }}
+              animate={{ opacity: 1, height: "auto" }}
+              exit={{ opacity: 0, height: 0 }}
+              className="mt-2 flex items-start gap-2 rounded-xl border border-rose-500/20 bg-rose-500/10 px-3 py-2 text-[11px] text-rose-400"
+            >
+              <AlertCircle className="mt-px size-3.5 shrink-0" strokeWidth={1.5} />
+              <span>{uploadError}</span>
+            </motion.div>
+          )}
+          {uploadSuccess && (
+            <motion.div
+              initial={{ opacity: 0, height: 0 }}
+              animate={{ opacity: 1, height: "auto" }}
+              exit={{ opacity: 0, height: 0 }}
+              className="mt-2 flex items-start gap-2 rounded-xl border border-emerald-500/20 bg-emerald-500/10 px-3 py-2 text-[11px] text-emerald-400"
+            >
+              <CheckCircle2 className="mt-px size-3.5 shrink-0" strokeWidth={1.5} />
+              <span>{uploadSuccess}</span>
+            </motion.div>
+          )}
+        </AnimatePresence>
+      </div>
+
+      {/* ── Scrollable Document List & Samples ────────────── */}
       <div className="custom-scrollbar flex min-h-0 flex-1 flex-col gap-6 overflow-y-auto px-1 pb-4">
 
         {/* Knowledge Base Section */}
@@ -172,9 +307,21 @@ export function Sidebar({
                   animate={{ opacity: 1, height: "auto" }}
                   exit={{ opacity: 0, height: 0 }}
                   transition={spring}
-                  className="group relative flex w-full items-center gap-3 overflow-hidden rounded-[10px] bg-transparent px-3 py-2.5 text-[13px] font-medium text-slate-600 dark:text-[#94a3b8] transition-colors hover:bg-white/60 dark:hover:bg-[#1e293b] hover:text-slate-900 dark:hover:text-[#f1f5f9]"
+                  className={`group relative flex w-full items-center gap-3 overflow-hidden rounded-[10px] px-3 py-2.5 text-[13px] font-medium transition-colors ${
+                    selectedDocumentFilename === doc.filename
+                      ? "bg-sky-500/10 text-slate-900 ring-1 ring-sky-300/40 dark:bg-sky-400/10 dark:text-[#f1f5f9] dark:ring-sky-400/18"
+                      : "bg-transparent text-slate-600 hover:bg-white/60 hover:text-slate-900 dark:text-[#94a3b8] dark:hover:bg-[#1e293b] dark:hover:text-[#f1f5f9]"
+                  }`}
+                  onClick={() => onSelectDocument(doc)}
                 >
-                  <FileText className="size-4 shrink-0 text-slate-400 dark:text-[#6b6975] group-hover:text-emerald-600 dark:group-hover:text-primary" strokeWidth={1.5} />
+                  <FileText
+                    className={`size-4 shrink-0 ${
+                      selectedDocumentFilename === doc.filename
+                        ? "text-sky-600 dark:text-sky-300"
+                        : "text-slate-400 group-hover:text-emerald-600 dark:text-[#6b6975] dark:group-hover:text-primary"
+                    }`}
+                    strokeWidth={1.5}
+                  />
 
                   <div className="flex min-w-0 flex-1 flex-col truncate">
                     <span className="truncate text-slate-700 dark:text-[#d1d0d5]" title={doc.filename}>
@@ -191,7 +338,10 @@ export function Sidebar({
                         variant="ghost"
                         size="icon"
                         disabled={deletingFile === doc.filename}
-                        onClick={() => handleDelete(doc.filename)}
+                        onClick={(event) => {
+                          event.stopPropagation();
+                          void handleDelete(doc.filename);
+                        }}
                         className="size-7 shrink-0 rounded-lg text-slate-400 dark:text-[#6b6975] opacity-0 transition-all hover:bg-rose-500/10 hover:text-rose-600 dark:hover:text-rose-400 group-hover:opacity-100 disabled:opacity-50"
                       >
                         {deletingFile === doc.filename ? (
@@ -209,99 +359,98 @@ export function Sidebar({
               ))}
             </AnimatePresence>
 
-            {/* Upload Zone */}
-            <motion.div
-              onDragOver={(e) => {
-                e.preventDefault();
-                setIsDragOver(true);
-              }}
-              onDragLeave={() => setIsDragOver(false)}
-              onDrop={handleDrop}
-              whileTap={{ scale: 0.98 }}
-              className={`group relative mt-2 flex w-full cursor-pointer flex-col items-center justify-center gap-2 overflow-hidden rounded-[12px] border border-dashed p-4 text-center transition-all duration-200 ${isDragOver
-                ? "border-emerald-500/50 bg-emerald-500/10 dark:border-primary/50 dark:bg-primary/10"
-                : "border-black/5 bg-white/60 hover:border-emerald-500/30 hover:bg-white dark:border-white/[0.1] dark:bg-[#0f172a]/50 dark:hover:border-primary/30 dark:hover:bg-[#0f172a]"
-                }`}
-              onClick={() => fileInputRef.current?.click()}
+          </div>
+        </div>
+
+        {/* ── Sample Document Pool ─────────────────────── */}
+        {(() => {
+          const loadedNames = new Set(documents.map((d) => d.filename));
+          const available = SAMPLE_DOCS.filter((s) => !loadedNames.has(s.file));
+          if (available.length === 0) return null;
+
+          return (
+            <div ref={samplePoolRef} className="shrink-0">
+            <button
+              onClick={() => setPoolOpen((v) => !v)}
+              className="flex w-full items-center justify-between rounded-lg px-2 py-2 text-[11px] font-semibold uppercase tracking-wider text-slate-400 dark:text-[#6b6975] hover:text-slate-600 dark:hover:text-slate-300 transition-colors"
             >
-              <input
-                ref={fileInputRef}
-                type="file"
-                accept=".pdf"
-                className="hidden"
-                onChange={(e) => handleUpload(e.target.files)}
-              />
+              <div className="flex items-center gap-1.5">
+                <BookOpen size={12} />
+                {t("pool.title", locale)}
+              </div>
+              <ChevronDown size={12} className={`transition-transform duration-200 ${poolOpen ? "rotate-180" : ""}`} />
+            </button>
 
-              {isUploading ? (
-                <div className="flex flex-col items-center gap-2 py-1">
-                  <Loader2 className="size-5 animate-spin text-emerald-500 dark:text-primary" />
-                  <span className="text-[11px] font-medium text-slate-500 dark:text-[#8e8c95]">{uploadStatus}</span>
-                </div>
-              ) : (
-                <div className="flex flex-col items-center gap-1.5 py-1">
-                  <div className={`flex size-8 items-center justify-center rounded-lg transition-colors ${isDragOver ? 'bg-emerald-100 text-emerald-600 dark:bg-primary/20 dark:text-primary' : 'bg-slate-100 text-slate-400 group-hover:text-slate-600 dark:bg-[#1e293b] dark:text-slate-400 dark:group-hover:text-slate-200'}`}>
-                    {isDragOver ? <CloudUpload size={16} /> : <Upload size={16} />}
+            <AnimatePresence initial={false}>
+              {poolOpen && (
+                <motion.div
+                  initial={{ height: 0, opacity: 0 }}
+                  animate={{ height: "auto", opacity: 1 }}
+                  exit={{ height: 0, opacity: 0 }}
+                  transition={spring}
+                  className="overflow-hidden"
+                >
+                  <div className="space-y-1 pb-2">
+                    {available.map((sample) => (
+                      <div
+                        key={sample.id}
+                        className="flex items-center justify-between gap-2 rounded-[10px] px-3 py-2 text-[12px] bg-transparent hover:bg-white/60 dark:hover:bg-[#1e293b] transition-colors"
+                      >
+                        <div className="flex min-w-0 flex-col">
+                          <span className="font-medium text-slate-700 dark:text-[#d1d0d5] truncate">{sample.name}</span>
+                          <div className="mt-1 flex min-w-0 flex-wrap items-center gap-1.5 text-[10px] text-slate-400 dark:text-[#6b6975]">
+                            <span className="truncate">{sample.desc}</span>
+                            <span className="size-1 rounded-full bg-slate-300 dark:bg-slate-700" />
+                            <span>{sample.pages} sayfa</span>
+                            {sample.tone === "summary" ? (
+                              <span className="rounded-full bg-amber-500/10 px-1.5 py-0.5 text-[9px] font-semibold uppercase tracking-[0.14em] text-amber-600 dark:bg-amber-400/10 dark:text-amber-300">
+                                Ozet
+                              </span>
+                            ) : null}
+                          </div>
+                        </div>
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          disabled={addingFromPool === sample.id || !isBackendOnline}
+                          onClick={async () => {
+                            setAddingFromPool(sample.id);
+                            try {
+                              const res = await fetch(`/samples/${sample.file}`);
+                              const blob = await res.blob();
+                              const file = new File([blob], sample.file, { type: "application/pdf" });
+                              await uploadPdf(file);
+                              onDocumentsChange();
+                            } catch (err) {
+                              setUploadError(
+                                err instanceof Error ? err.message : t("upload.failed", locale)
+                              );
+                            } finally {
+                              setAddingFromPool(null);
+                            }
+                          }}
+                          className="shrink-0 h-7 px-3 text-[11px] font-medium rounded-lg text-emerald-600 dark:text-primary hover:bg-emerald-500/10 dark:hover:bg-primary/10"
+                        >
+                          {addingFromPool === sample.id ? (
+                            <Loader2 className="size-3 animate-spin" />
+                          ) : (
+                            t("pool.add", locale)
+                          )}
+                        </Button>
+                      </div>
+                    ))}
                   </div>
-                  <span className="text-[12px] font-medium text-slate-700 dark:text-[#d1d0d5]">
-                    {t("upload.title", locale)}
-                  </span>
-                  <span className="text-[10px] text-slate-400 dark:text-[#6b6975]">
-                    {t("upload.hint", locale)}
-                  </span>
-                </div>
-              )}
-            </motion.div>
-
-            {/* Feedback Alerts */}
-            <AnimatePresence>
-              {uploadError && (
-                <motion.div
-                  initial={{ opacity: 0, height: 0 }}
-                  animate={{ opacity: 1, height: "auto" }}
-                  exit={{ opacity: 0, height: 0 }}
-                  className="mt-2 flex items-start gap-2 rounded-xl border border-rose-500/20 bg-rose-500/10 px-3 py-2 text-[11px] text-rose-400"
-                >
-                  <AlertCircle className="mt-px size-3.5 shrink-0" strokeWidth={1.5} />
-                  <span>{uploadError}</span>
-                </motion.div>
-              )}
-              {uploadSuccess && (
-                <motion.div
-                  initial={{ opacity: 0, height: 0 }}
-                  animate={{ opacity: 1, height: "auto" }}
-                  exit={{ opacity: 0, height: 0 }}
-                  className="mt-2 flex items-start gap-2 rounded-xl border border-emerald-500/20 bg-emerald-500/10 px-3 py-2 text-[11px] text-emerald-400"
-                >
-                  <CheckCircle2 className="mt-px size-3.5 shrink-0" strokeWidth={1.5} />
-                  <span>{uploadSuccess}</span>
                 </motion.div>
               )}
             </AnimatePresence>
-          </div>
-        </div>
+            </div>
+          );
+        })()}
       </div>
 
-      {/* ── Premium-style Status Card ────────────────────── */}
-      <div className="mt-4 shrink-0 rounded-2xl border border-black/5 dark:border-white/[0.04] bg-white/60 dark:bg-[#0f172a] p-4">
-        <div className="mb-3 flex items-center justify-between">
-          <div className="flex size-7 items-center justify-center rounded-full bg-emerald-100 text-emerald-600 dark:bg-[#1e293b] dark:text-white">
-            <Crown size={14} />
-          </div>
-          <div className="flex items-center gap-1.5">
-            <span className="text-[10px] font-medium uppercase tracking-widest text-slate-500 dark:text-[#7d7b86]">
-              {isBackendOnline ? t("status.online", locale) : t("status.offline", locale)}
-            </span>
-            <CircleDot
-              className={`size-3.5 ${isBackendOnline ? "animate-breathe text-emerald-500" : "text-rose-500"
-                }`}
-              strokeWidth={2.5}
-            />
-          </div>
-        </div>
-
-        <h4 className="mb-1.5 text-[13px] font-medium text-slate-800 dark:text-[#f0f0f0]">Platform Analytics</h4>
-
-        <div className="mb-4 flex gap-4 text-slate-500 dark:text-[#7d7b86]">
+      {/* ── Compact Metrics ─────────────────────────────── */}
+      <div className="mt-3 shrink-0 rounded-2xl border border-black/5 dark:border-white/[0.04] bg-white/60 dark:bg-[#0f172a] p-4">
+        <div className="flex gap-4 text-slate-500 dark:text-[#7d7b86]">
           <div className="flex flex-col">
             <span className="text-[18px] font-semibold text-slate-900 dark:text-white">{documents.length}</span>
             <span className="text-[10px] uppercase tracking-wider">{t("metrics.documents", locale)}</span>
@@ -313,11 +462,6 @@ export function Sidebar({
             <span className="text-[10px] uppercase tracking-wider">{t("metrics.chunks", locale)}</span>
           </div>
         </div>
-
-        <button className="flex w-full items-center justify-center gap-2 rounded-lg border border-black/5 dark:border-white/[0.02] bg-slate-100 dark:bg-[#1e293b] py-2 text-[12px] font-medium text-slate-600 dark:text-slate-200 transition-colors hover:bg-slate-200 dark:hover:bg-[#334155]">
-          <Database size={13} className="text-slate-400 dark:text-slate-400" />
-          <span>Manage Instances</span>
-        </button>
       </div>
 
     </div>

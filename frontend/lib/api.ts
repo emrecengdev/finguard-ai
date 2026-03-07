@@ -3,8 +3,6 @@
  * Handles communication with the FastAPI backend via Next.js JWT Handshake.
  */
 
-const API_BASE = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
-
 // ─── Types ──────────────────────────────────────────────────────────
 
 export interface AgentStep {
@@ -51,29 +49,48 @@ export interface UploadPdfOptions {
     ocrEngine?: string;
 }
 
-// ─── Auth Helper ────────────────────────────────────────────────────
+interface StreamHandlers {
+    onError: (error: string) => void;
+    onResponse: (data: { response: string; guardrail_passed: boolean; sources: ChatSource[] }) => void;
+    onStep: (step: AgentStep) => void;
+}
 
-async function getAuthToken(): Promise<string> {
+function handleStreamPayload(
+    eventName: string,
+    payload: string,
+    handlers: StreamHandlers
+) {
+    if (!payload) return;
+
     try {
-        const res = await fetch("/api/auth/token");
-        if (!res.ok) throw new Error("Failed to fetch token");
-        const data = await res.json();
-        return data.token;
-    } catch (e) {
-        console.error("JWT Handshake error:", e);
-        return "";
+        const parsed = JSON.parse(payload);
+        if (eventName === "agent_step" || parsed.node) {
+            handlers.onStep(parsed as AgentStep);
+            return;
+        }
+
+        if (eventName === "response" || parsed.response !== undefined) {
+            handlers.onResponse(parsed);
+            return;
+        }
+
+        if (eventName === "error" || parsed.detail) {
+            handlers.onError(parsed.detail || "Unknown stream error");
+        }
+    } catch {
+        if (eventName === "error") {
+            handlers.onError(payload);
+        }
     }
 }
 
 // ─── API Functions ──────────────────────────────────────────────────
 
 export async function sendMessage(message: string, sessionId: string = "default"): Promise<ChatResponse> {
-    const token = await getAuthToken();
-    const res = await fetch(`${API_BASE}/chat`, {
+    const res = await fetch("/api/chat", {
         method: "POST",
         headers: {
             "Content-Type": "application/json",
-            "Authorization": `Bearer ${token}`
         },
         body: JSON.stringify({ message, session_id: sessionId }),
     });
@@ -93,12 +110,10 @@ export async function streamMessage(
     onResponse: (data: { response: string; guardrail_passed: boolean; sources: ChatSource[] }) => void,
     onError: (error: string) => void,
 ): Promise<void> {
-    const token = await getAuthToken();
-    const res = await fetch(`${API_BASE}/chat/stream`, {
+    const res = await fetch("/api/chat/stream", {
         method: "POST",
         headers: {
             "Content-Type": "application/json",
-            "Authorization": `Bearer ${token}`
         },
         body: JSON.stringify({ message, session_id: sessionId }),
     });
@@ -113,36 +128,61 @@ export async function streamMessage(
 
     const decoder = new TextDecoder();
     let buffer = "";
+    let pendingEvent = "message";
+    let pendingData: string[] = [];
+
+    const flushEvent = () => {
+        if (pendingData.length === 0) {
+            pendingEvent = "message";
+            return;
+        }
+
+        handleStreamPayload(
+            pendingEvent,
+            pendingData.join("\n"),
+            { onError, onResponse, onStep }
+        );
+        pendingEvent = "message";
+        pendingData = [];
+    };
+
+    const processLine = (rawLine: string) => {
+        const line = rawLine.replace(/\r$/, "");
+        if (line === "") {
+            flushEvent();
+            return;
+        }
+
+        if (line.startsWith("event:")) {
+            pendingEvent = line.slice(6).trim();
+            return;
+        }
+
+        if (line.startsWith("data:")) {
+            pendingData.push(line.slice(5).trimStart());
+        }
+    };
 
     while (true) {
         const { done, value } = await reader.read();
-        if (done) break;
+        if (done) {
+            break;
+        }
 
         buffer += decoder.decode(value, { stream: true });
         const lines = buffer.split("\n");
         buffer = lines.pop() || "";
 
         for (const line of lines) {
-            if (line.startsWith("event: ")) {
-                continue;
-            }
-            if (line.startsWith("data: ")) {
-                const data = line.slice(6);
-                try {
-                    const parsed = JSON.parse(data);
-                    if (parsed.node) {
-                        onStep(parsed as AgentStep);
-                    } else if (parsed.response !== undefined) {
-                        onResponse(parsed);
-                    } else if (parsed.detail) {
-                        onError(parsed.detail);
-                    }
-                } catch {
-                    // skip malformed data
-                }
-            }
+            processLine(line);
         }
     }
+
+    if (buffer) {
+        processLine(buffer);
+    }
+
+    flushEvent();
 }
 
 export async function uploadPdf(file: File, options: UploadPdfOptions = {}): Promise<UploadResponse> {
@@ -153,12 +193,8 @@ export async function uploadPdf(file: File, options: UploadPdfOptions = {}): Pro
         formData.append("ocr_engine", options.ocrEngine || "unknown");
     }
 
-    const token = await getAuthToken();
-    const res = await fetch(`${API_BASE}/upload_pdf`, {
+    const res = await fetch("/api/upload", {
         method: "POST",
-        headers: {
-            "Authorization": `Bearer ${token}`
-        },
         body: formData,
     });
 
@@ -171,10 +207,7 @@ export async function uploadPdf(file: File, options: UploadPdfOptions = {}): Pro
 }
 
 export async function getDocuments(): Promise<DocumentInfo[]> {
-    const token = await getAuthToken();
-    const res = await fetch(`${API_BASE}/documents`, {
-        headers: { "Authorization": `Bearer ${token}` }
-    });
+    const res = await fetch("/api/documents");
 
     if (!res.ok) {
         const err = await res.json().catch(() => ({ detail: "Unknown error" }));
@@ -185,10 +218,8 @@ export async function getDocuments(): Promise<DocumentInfo[]> {
 }
 
 export async function deleteDocument(filename: string): Promise<void> {
-    const token = await getAuthToken();
-    const res = await fetch(`${API_BASE}/documents/${encodeURIComponent(filename)}`, {
+    const res = await fetch(`/api/documents/${encodeURIComponent(filename)}`, {
         method: "DELETE",
-        headers: { "Authorization": `Bearer ${token}` }
     });
 
     if (!res.ok) {
@@ -199,11 +230,13 @@ export async function deleteDocument(filename: string): Promise<void> {
 
 export async function healthCheck(): Promise<boolean> {
     try {
-        const token = await getAuthToken();
-        const res = await fetch(`${API_BASE}/health`, {
-            headers: { "Authorization": `Bearer ${token}` }
-        });
-        return res.ok;
+        const res = await fetch("/api/health");
+        if (!res.ok) {
+            return false;
+        }
+
+        const data = await res.json().catch(() => ({ ok: false }));
+        return Boolean(data.ok);
     } catch {
         return false;
     }

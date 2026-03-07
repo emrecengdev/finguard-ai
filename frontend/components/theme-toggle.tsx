@@ -1,17 +1,13 @@
 "use client"
 
-import * as React from "react"
 import { Moon, Sun } from "lucide-react"
 import { useTheme } from "next-themes"
 import { motion } from "framer-motion"
+import { useMounted } from "@/hooks/use-mounted"
 
 export function ThemeToggle() {
     const { setTheme, theme, systemTheme } = useTheme()
-    const [mounted, setMounted] = React.useState(false)
-
-    React.useEffect(() => {
-        setMounted(true)
-    }, [])
+    const mounted = useMounted()
 
     if (!mounted) {
         return <div className="w-[68px] h-[32px] rounded-full bg-black/5 dark:bg-white/5 animate-pulse" />

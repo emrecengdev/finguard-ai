@@ -42,9 +42,18 @@ const translations = {
     "chat.header": { tr: "Akıllı Sohbet", en: "Agentic Chat" },
     "chat.badge": { tr: "Çoklu-Ajan Hattı", en: "Multi-Agent Pipeline" },
     "chat.label": { tr: "Uyum Asistanı", en: "Compliance Copilot" },
+    "chat.you": { tr: "Siz", en: "You" },
     "chat.welcome": {
-        tr: "FinGuard'a iş hukuku, İK politikası ve bankacılık uyumu hakkında sorun.",
-        en: "Ask FinGuard about labor law, HR policy, and compliance.",
+        tr: "FinGuard AI'ya hoş geldiniz",
+        en: "Welcome to FinGuard AI",
+    },
+    "chat.welcome_empty": {
+        tr: "Başlamak için sol panelden bir PDF belgesi yükleyin veya örnek belgelerden birini ekleyin.",
+        en: "Upload a PDF from the sidebar or add a sample document to get started.",
+    },
+    "chat.welcome_loaded": {
+        tr: "Yüklü belgeleriniz hakkında sorular sorun.",
+        en: "Ask questions about your loaded documents.",
     },
     "chat.welcome_desc": {
         tr: "Sorularınız Yönlendirici, Bilgi, Araç ve Güvence ajanlarından geçerek kaynaklı yanıt döner.",
@@ -61,25 +70,57 @@ const translations = {
     "chat.composing": { tr: "Yanıt oluşturuluyor...", en: "Composing response..." },
     "chat.compliance_ok": { tr: "Uyum doğrulandı", en: "Compliance verified" },
     "chat.compliance_flag": { tr: "Uyum uyarısı", en: "Compliance flagged" },
+    "chat.pipeline_title": { tr: "Ajan Akışı", en: "Agent Pipeline" },
+    "chat.pipeline_live": { tr: "Ajanlar çalışıyor", en: "Agents running" },
+    "chat.pipeline_done": { tr: "Ajan akışı tamamlandı", en: "Agent pipeline complete" },
+    "chat.pipeline_elapsed": { tr: "Süre", en: "Elapsed" },
+    "chat.pipeline_current": { tr: "Aktif ajan", en: "Active agent" },
+    "chat.pipeline_latest": { tr: "Son ajan çıktısı", en: "Latest agent update" },
+    "chat.pipeline_waiting": {
+        tr: "Belge tabanlı yanıt hazırlanıyor",
+        en: "Preparing a document-grounded response",
+    },
+    "chat.pipeline_ready": { tr: "Yanıt hazır", en: "Response ready" },
+    "chat.pipeline_pending": { tr: "Beklemede", en: "Pending" },
     "chat.error_prefix": { tr: "Hata", en: "Error" },
     "chat.error_generic": { tr: "Beklenmeyen hata oluştu", en: "Unexpected failure" },
 
-    // ─── Suggestions ──────────────────────────────────
-    "suggestion.1": {
-        tr: "Türk İş Kanunu'na göre yıllık izin hakları nelerdir?",
-        en: "Annual leave rights under Turkish Labor Law",
+    // ─── Suggestions (Empty State) ─────────────────────
+    "suggestion.upload": {
+        tr: "Sol panelden bir PDF belgesi yükleyin",
+        en: "Upload a PDF document from the sidebar",
     },
-    "suggestion.2": {
-        tr: "EMP-0042 çalışanının izin hakkını kontrol et",
-        en: "Check leave entitlement for employee EMP-0042",
+    "suggestion.sample_pool": {
+        tr: "Örnek belgelerden birini ekleyin",
+        en: "Add a document from samples",
     },
-    "suggestion.3": {
-        tr: "250.000 TL kredi riski hesapla",
-        en: "Calculate credit risk for 250,000 TRY exposure",
+
+    // ─── Suggestions (Loaded State) ──────────────────
+    "suggestion.ask_about": {
+        tr: "{{doc}} hakkında soru sor",
+        en: "Ask about {{doc}}",
     },
-    "suggestion.4": {
-        tr: "Fazla mesai sınırları ve hafta sonu çalışma kuralları",
-        en: "Overtime limits and weekend work regulations",
+    "suggestion.summarize": {
+        tr: "{{doc}} belgesini özetle",
+        en: "Summarize {{doc}}",
+    },
+    "suggestion.compare": {
+        tr: "Belgeler arasındaki farkları karşılaştır",
+        en: "Compare differences between documents",
+    },
+
+    // ─── Sample Pool ─────────────────────────────────
+    "pool.title": {
+        tr: "Örnek Belgeler",
+        en: "Sample Documents",
+    },
+    "pool.add": {
+        tr: "Ekle",
+        en: "Add",
+    },
+    "pool.adding": {
+        tr: "Ekleniyor...",
+        en: "Adding...",
     },
 
     // ─── Agent Steps ──────────────────────────────────
@@ -102,6 +143,18 @@ const translations = {
     // ─── Language ─────────────────────────────────────
     "lang.tr": { tr: "Türkçe", en: "Turkish" },
     "lang.en": { tr: "İngilizce", en: "English" },
+
+    // ─── Voice ────────────────────────────────────────
+    "voice.listening": { tr: "Dinleniyor...", en: "Listening..." },
+    "voice.speaking": { tr: "Okunuyor...", en: "Speaking..." },
+    "voice.not_supported": {
+        tr: "Tarayıcınız ses tanımayı desteklemiyor",
+        en: "Your browser does not support speech recognition",
+    },
+    "voice.tts_error": {
+        tr: "Sesli yanıt oluşturulamadı",
+        en: "Could not generate voice response",
+    },
 
     // ─── Mobile ───────────────────────────────────────
     "mobile.menu": { tr: "Menü", en: "Menu" },

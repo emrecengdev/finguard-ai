@@ -2,16 +2,11 @@
 
 import { motion } from "framer-motion"
 import { useAppStore } from "@/store/useAppStore"
-import type { Locale } from "@/lib/i18n"
-import { useEffect, useState } from "react"
+import { useMounted } from "@/hooks/use-mounted"
 
 export function LanguageSwitcher() {
     const { locale, setLocale } = useAppStore()
-    const [mounted, setMounted] = useState(false)
-
-    useEffect(() => {
-        setMounted(true)
-    }, [])
+    const mounted = useMounted()
 
     if (!mounted) {
         return <div className="w-[68px] h-[32px] rounded-full bg-black/5 dark:bg-white/5 animate-pulse" />

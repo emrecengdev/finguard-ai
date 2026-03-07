@@ -9,6 +9,7 @@ services:
       - "8000:8000"
     volumes:
       - chroma_data:/app/data/chromadb
+      - uploads_data:/app/data/uploads
       - embedding_cache:/app/data/embeddings
       - reranker_cache:/app/data/rerankers
       - hf_cache:/app/data/hf
@@ -29,6 +30,8 @@ services:
 
 volumes:
   chroma_data:
+    driver: local
+  uploads_data:
     driver: local
   embedding_cache:
     driver: local

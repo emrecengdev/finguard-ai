@@ -19,6 +19,8 @@ class CreditRiskInput(BaseModel):
 
 class CreditRiskOutput(BaseModel):
     """Output schema for credit risk calculation."""
+    simulated: bool
+    disclaimer: str
     tc_id: str
     requested_amount: float
     risk_score: float
@@ -36,6 +38,8 @@ class LeaveEntitlementInput(BaseModel):
 
 class LeaveEntitlementOutput(BaseModel):
     """Output schema for leave entitlement check."""
+    simulated: bool
+    disclaimer: str
     employee_id: str
     employee_name: str
     total_annual_leave: int
@@ -51,12 +55,16 @@ class LeaveEntitlementOutput(BaseModel):
 
 # ─── Mock Implementations ───────────────────────────────────────────
 
+SIMULATION_DISCLAIMER = (
+    "Simulated demo output. Not based on live customer, payroll, or bureau data."
+)
+
 def calculate_credit_risk(params: CreditRiskInput) -> CreditRiskOutput:
     """
     Simulates a credit risk assessment based on TC ID and amount.
     Uses deterministic seeding from the TC ID for consistent results.
     """
-    seed = int(hashlib.md5(params.tc_id.encode()).hexdigest()[:8], 16)
+    seed = int(hashlib.sha256(params.tc_id.encode()).hexdigest()[:8], 16)
     rng = random.Random(seed)
 
     risk_score = round(rng.uniform(200, 850), 1)
@@ -90,6 +98,8 @@ def calculate_credit_risk(params: CreditRiskInput) -> CreditRiskOutput:
     )
 
     return CreditRiskOutput(
+        simulated=True,
+        disclaimer=SIMULATION_DISCLAIMER,
         tc_id=params.tc_id,
         requested_amount=params.amount,
         risk_score=risk_score,
@@ -109,7 +119,7 @@ def check_leave_entitlement(params: LeaveEntitlementInput) -> LeaveEntitlementOu
       - 5-15 years: 20 days
       - 15+ years: 26 days
     """
-    seed = int(hashlib.md5(params.employee_id.encode()).hexdigest()[:8], 16)
+    seed = int(hashlib.sha256(params.employee_id.encode()).hexdigest()[:8], 16)
     rng = random.Random(seed)
 
     first_names = ["Ahmet", "Elif", "Mehmet", "Zeynep", "Emre", "Ayşe", "Burak", "Selin"]
@@ -147,6 +157,8 @@ def check_leave_entitlement(params: LeaveEntitlementInput) -> LeaveEntitlementOu
         notes = "Employee leave balance is within normal parameters."
 
     return LeaveEntitlementOutput(
+        simulated=True,
+        disclaimer=SIMULATION_DISCLAIMER,
         employee_id=params.employee_id,
         employee_name=name,
         total_annual_leave=total_leave,
@@ -168,18 +180,16 @@ TOOL_REGISTRY = {
         "function": calculate_credit_risk,
         "input_schema": CreditRiskInput,
         "description": (
-            "Calculate credit risk score for a Turkish citizen based on their TC Kimlik No "
-            "and requested credit amount. Returns risk assessment, monthly payment estimate, "
-            "and recommendation."
+            "Simulated demo credit risk estimate based on a Turkish citizen ID and requested "
+            "credit amount. Does not use any live banking or bureau data."
         ),
     },
     "check_leave_entitlement": {
         "function": check_leave_entitlement,
         "input_schema": LeaveEntitlementInput,
         "description": (
-            "Check an employee's annual leave entitlement and balance according to "
-            "Turkish Labor Law (İş Kanunu No. 4857, Article 53). Returns total, used, "
-            "and remaining leave days."
+            "Simulated demo leave-balance estimate according to Turkish Labor Law "
+            "(İş Kanunu No. 4857, Article 53). Does not use a live HRIS or payroll system."
         ),
     },
 }

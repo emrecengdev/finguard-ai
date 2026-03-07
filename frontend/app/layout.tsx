@@ -2,6 +2,7 @@ import type { Metadata } from "next";
 import { Outfit, Space_Grotesk } from "next/font/google";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { ThemeProvider } from "@/components/theme-provider";
+import { ShaderBackground } from "@/components/shader-background";
 import "./globals.css";
 
 const outfit = Outfit({
@@ -36,7 +37,10 @@ export default function RootLayout({
           enableSystem
           disableTransitionOnChange
         >
-          <TooltipProvider delayDuration={150}>{children}</TooltipProvider>
+          <TooltipProvider delayDuration={150}>
+            <ShaderBackground />
+            {children}
+          </TooltipProvider>
         </ThemeProvider>
       </body>
     </html>

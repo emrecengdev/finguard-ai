@@ -1,6 +1,66 @@
 #!/bin/bash
 API="http://localhost:8000/chat"
 
+load_jwt_secret() {
+  if [ -n "$API_JWT_SECRET" ]; then
+    printf '%s' "$API_JWT_SECRET"
+    return 0
+  fi
+
+  if [ -f "backend/.env" ]; then
+    python3 - <<'PY'
+from pathlib import Path
+
+for raw_line in Path("backend/.env").read_text().splitlines():
+    line = raw_line.strip()
+    if not line or line.startswith("#") or "=" not in line:
+        continue
+    key, value = line.split("=", 1)
+    if key.strip() == "API_JWT_SECRET":
+        print(value.strip())
+        break
+PY
+  fi
+}
+
+JWT_SECRET="$(load_jwt_secret)"
+
+if [ -z "$JWT_SECRET" ]; then
+  echo "API_JWT_SECRET is required to run smoke tests."
+  exit 1
+fi
+
+JWT_TOKEN="$(JWT_SECRET="$JWT_SECRET" python3 - <<'PY'
+import base64
+import hashlib
+import hmac
+import json
+import os
+import time
+
+secret = os.environ["JWT_SECRET"].encode()
+
+def b64url(data: bytes) -> str:
+    return base64.urlsafe_b64encode(data).rstrip(b"=").decode()
+
+header = b64url(json.dumps({"alg": "HS256", "typ": "JWT"}, separators=(",", ":")).encode())
+payload = b64url(
+    json.dumps(
+        {
+            "sub": "finguard-frontend",
+            "iss": "finguard-web",
+            "aud": "finguard-backend",
+            "iat": int(time.time()),
+            "exp": int(time.time()) + 60,
+        },
+        separators=(",", ":"),
+    ).encode()
+)
+signature = b64url(hmac.new(secret, f"{header}.{payload}".encode(), hashlib.sha256).digest())
+print(f"{header}.{payload}.{signature}")
+PY
+)"
+
 run_test() {
   local NUM="$1"
   local LABEL="$2"
@@ -9,6 +69,7 @@ run_test() {
   echo "TEST $NUM: $LABEL"
   echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
   curl -s -X POST "$API" -H "Content-Type: application/json" \
+    -H "Authorization: Bearer $JWT_TOKEN" \
     -d "{\"message\":\"$MSG\",\"session_id\":\"stress-$NUM\"}" \
     | python3 -c "
 import sys,json

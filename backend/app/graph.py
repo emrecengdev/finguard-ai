@@ -5,6 +5,8 @@ StateGraph: Router → RAG / Tool / Parallel → Synthesizer → Guardrail → E
 
 import json
 import logging
+import asyncio
+import time
 from typing import TypedDict, Literal, Any
 
 from langgraph.graph import StateGraph, END
@@ -45,16 +47,45 @@ def _call_llm(system_prompt: str, user_prompt: str) -> str:
         raise ValueError("CEREBRAS_API_KEY is not configured")
 
     client = Cerebras(api_key=settings.cerebras_api_key)
-    response = client.chat.completions.create(
-        model=settings.cerebras_model,
-        messages=[
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_prompt},
-        ],
-        temperature=0.1,
-        max_tokens=2048,
-    )
-    return response.choices[0].message.content.strip()
+    retry_delays = (1, 2, 4)
+    last_error: Exception | None = None
+
+    for attempt, retry_delay in enumerate((0, *retry_delays), start=1):
+        try:
+            response = client.chat.completions.create(
+                model=settings.cerebras_model,
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_prompt},
+                ],
+                temperature=0.1,
+                max_tokens=2048,
+            )
+            return response.choices[0].message.content.strip()
+        except Exception as e:
+            last_error = e
+            error_text = str(e).lower()
+            is_retryable = any(
+                marker in error_text
+                for marker in ("queue_exceeded", "too_many_requests", "high traffic", "429")
+            )
+
+            if not is_retryable or attempt > len(retry_delays):
+                raise
+
+            logger.warning(
+                "Transient Cerebras API error on attempt %s/%s. Retrying in %ss. Error: %s",
+                attempt,
+                len(retry_delays) + 1,
+                retry_delay,
+                str(e),
+            )
+            time.sleep(retry_delay)
+
+    if last_error is not None:
+        raise last_error
+
+    raise RuntimeError("Cerebras API call failed without returning a response")
 
 
 # ─── Node: Router ────────────────────────────────────────────────────
@@ -68,6 +99,10 @@ Your job is to analyze the user's message and decide the routing:
 
 Available tools:
 {get_tools_description()}
+
+Important tooling note:
+- All available tools are SIMULATED demo workflows, not live banking or HR systems.
+- Never imply that tool outputs were sourced from production databases, payroll systems, or credit bureaus.
 
 IMPORTANT: If the user's question clearly references a specific law or regulation, set "source_hint" to help narrow the search. Examples:
 - "KVKK" or "6698" or "kişisel veri" → "kkvk.pdf"
@@ -169,7 +204,12 @@ def rag_node(state: AgentState) -> AgentState:
         step["status"] = "error"
         step["detail"] = f"RAG retrieval failed: {str(e)}"
         steps[-1] = step
-        return {**state, "rag_context": [], "agent_steps": steps}
+        return {
+            **state,
+            "rag_context": [],
+            "agent_steps": steps,
+            "error": f"RAG retrieval failed: {str(e)}",
+        }
 
 
 # ─── Node: Tool Execution ────────────────────────────────────────────
@@ -226,7 +266,8 @@ Rules:
 9. Add a final `## Sources` section and list each citation as a bullet, for example:
    `- [Source: HR_Policy.pdf, Page 4]`
 10. If no context or results are available, politely state that you don't have enough information.
-11. Never fabricate information — only use what's provided."""
+11. Never fabricate information — only use what's provided.
+12. If a tool result contains `simulated: true`, clearly label it as a simulation/demo estimate."""
 
 
 def synthesizer_node(state: AgentState) -> AgentState:
@@ -252,10 +293,27 @@ def synthesizer_node(state: AgentState) -> AgentState:
         context_parts.append(f"## Tool Execution Result\n```json\n{tool_result}\n```")
 
     if not context_parts:
-        context_parts.append(
-            "No knowledge context or tool results are available. "
-            "Respond based on general knowledge or ask the user for more details."
+        retrieval_error = state.get("error", "")
+        if retrieval_error:
+            fallback = (
+                "Belgeleriniz yüklü olabilir ancak bilgi tabanı sorgusu sırasında teknik bir hata oluştu. "
+                "Lütfen kısa süre sonra tekrar deneyin. Sorun devam ederse belgeyi yeniden yükleyin."
+            )
+            step["status"] = "error"
+            step["detail"] = retrieval_error
+            steps[-1] = step
+            return {**state, "synthesized_response": fallback, "agent_steps": steps}
+
+        fallback = (
+            "Sistemde yüklü herhangi bir belge (PDF) bulunmamaktadır veya sorunuzla eşleşen "
+            "bir içerik tespit edilememiştir. FinGuard AI, hukuki tavsiye ve finansal analiz "
+            "yaparken sadece yüklenen belgeleri baz alır (Sıfır-Halüsinasyon Politikası).\n\n"
+            "Lütfen sol panelden ilgili PDF belgesini yükleyip sorunuzu tekrar yöneltin."
         )
+        step["status"] = "skipped"
+        step["detail"] = "Zero documents loaded. LLM execution skipped to prevent hallucination."
+        steps[-1] = step
+        return {**state, "synthesized_response": fallback, "agent_steps": steps}
 
     combined_context = "\n\n".join(context_parts)
     user_prompt = (
@@ -359,14 +417,16 @@ def guardrail_node(state: AgentState) -> AgentState:
 
     except Exception as e:
         logger.error(f"Guardrail error: {e}")
-        # If guardrail fails, pass through the synthesized response
         step["status"] = "error"
-        step["detail"] = f"Guardrail check failed: {str(e)}. Passing through."
+        step["detail"] = f"Guardrail check failed: {str(e)}. Response blocked."
         steps[-1] = step
         return {
             **state,
-            "final_response": synthesized,
-            "guardrail_passed": True,
+            "final_response": (
+                "I couldn't complete the compliance verification for this response. "
+                "Please try again in a moment."
+            ),
+            "guardrail_passed": False,
             "agent_steps": steps,
         }
 
@@ -470,5 +530,5 @@ async def run_graph(user_message: str) -> AgentState:
     }
 
     # Run the graph
-    final_state = graph.invoke(initial_state)
+    final_state = await asyncio.to_thread(graph.invoke, initial_state)
     return final_state

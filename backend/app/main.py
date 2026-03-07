@@ -1,17 +1,19 @@
 """
 FinGuard AI — FastAPI Application
-Routes: /health, /upload_pdf, /chat, /documents, /documents/{filename}
+Routes: /health, /upload_pdf, /chat, /documents, /documents/{filename}, /documents/{filename}/file
 """
 
 import os
 import json
 import logging
 import asyncio
+from pathlib import Path
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Depends, Query, Security
+from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Depends, Security
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse
 from pydantic import BaseModel
 from sse_starlette.sse import EventSourceResponse
 import jwt
@@ -129,22 +131,22 @@ security = HTTPBearer(auto_error=False)
 
 async def verify_jwt_token(
     credentials: HTTPAuthorizationCredentials | None = Security(security),
-    token: str | None = Query(None)
 ):
     """
-    Verifies JWT token. Acceptable via Authorization Bearer header OR ?token= query.
-    EventSource (SSE) running in the browser only supports query parameters natively.
+    Verifies the short-lived server-to-server JWT minted by the Next.js proxy.
     """
-    actual_token = token
-    if credentials:
-        actual_token = credentials.credentials
-        
-    if not actual_token:
+    if not credentials or not credentials.credentials:
         raise HTTPException(status_code=401, detail="Missing authentication token")
-        
+
     settings = get_settings()
     try:
-        payload = jwt.decode(actual_token, settings.api_jwt_secret, algorithms=["HS256"])
+        payload = jwt.decode(
+            credentials.credentials,
+            settings.api_jwt_secret,
+            algorithms=["HS256"],
+            audience=settings.api_jwt_audience,
+            issuer=settings.api_jwt_issuer,
+        )
         if payload.get("sub") != "finguard-frontend":
             raise HTTPException(status_code=403, detail="Invalid token subject")
         return payload
@@ -152,6 +154,42 @@ async def verify_jwt_token(
         raise HTTPException(status_code=401, detail="Token expired")
     except jwt.InvalidTokenError:
         raise HTTPException(status_code=401, detail="Invalid token")
+
+
+def _sanitize_filename(filename: str) -> str:
+    candidate = filename.strip()
+    if not candidate:
+        raise HTTPException(status_code=400, detail="Filename is required.")
+
+    if any(separator in candidate for separator in ("/", "\\")):
+        raise HTTPException(status_code=400, detail="Invalid filename.")
+
+    safe_filename = Path(candidate).name
+    if safe_filename in {"", ".", ".."} or safe_filename != candidate:
+        raise HTTPException(status_code=400, detail="Invalid filename.")
+
+    return safe_filename
+
+
+async def _persist_upload_file(upload: UploadFile, destination: str, max_bytes: int) -> int:
+    total_bytes = 0
+
+    with open(destination, "wb") as output_file:
+        while True:
+            chunk = await upload.read(1024 * 1024)
+            if not chunk:
+                break
+
+            total_bytes += len(chunk)
+            if total_bytes > max_bytes:
+                raise HTTPException(
+                    status_code=413,
+                    detail=f"Uploaded file exceeds the {max_bytes} byte limit.",
+                )
+
+            output_file.write(chunk)
+
+    return total_bytes
 
 
 # ─── Routes ──────────────────────────────────────────────────────────
@@ -162,7 +200,7 @@ async def health_check():
 
 
 @app.get("/runtime_status")
-async def runtime_status():
+async def runtime_status(user: dict = Depends(verify_jwt_token)):
     return get_runtime_optimization_status()
 
 
@@ -171,21 +209,24 @@ async def upload_pdf(
     file: UploadFile = File(...),
     ocr_pages: str | None = Form(default=None),
     ocr_engine: str = Form(default=""),
+    user: dict = Depends(verify_jwt_token),
 ):
     """Upload and ingest a PDF document into the knowledge base."""
     if not file.filename or not file.filename.lower().endswith(".pdf"):
         raise HTTPException(status_code=400, detail="Only PDF files are accepted.")
 
     settings = get_settings()
-    file_path = os.path.join(settings.upload_dir, file.filename)
+    file_path = ""
+    safe_filename = _sanitize_filename(file.filename)
+    file_path = os.path.join(settings.upload_dir, safe_filename)
 
     try:
-        # Save the uploaded file
-        content = await file.read()
-        with open(file_path, "wb") as f:
-            f.write(content)
-
-        logger.info(f"Uploaded file saved: {file_path} ({len(content)} bytes)")
+        file_size = await _persist_upload_file(
+            file,
+            file_path,
+            settings.max_upload_bytes,
+        )
+        logger.info(f"Uploaded file saved: {file_path} ({file_size} bytes)")
 
         extracted_pages: list[dict] | None = None
         extraction_mode = "native"
@@ -218,7 +259,7 @@ async def upload_pdf(
                 normalized_ocr_engine = ocr_engine.strip() or "unknown"
                 logger.info(
                     "Received OCR payload for %s: %d pages (engine=%s)",
-                    file.filename,
+                    safe_filename,
                     len(extracted_pages),
                     normalized_ocr_engine,
                 )
@@ -231,7 +272,7 @@ async def upload_pdf(
         result = await asyncio.to_thread(
             ingest_pdf,
             file_path,
-            file.filename,
+            safe_filename,
             extracted_pages,
             extraction_mode,
             normalized_ocr_engine,
@@ -240,14 +281,24 @@ async def upload_pdf(
         return UploadResponse(**result)
 
     except ValueError as e:
+        if file_path and os.path.exists(file_path):
+            os.remove(file_path)
         raise HTTPException(status_code=422, detail=str(e))
+    except HTTPException:
+        if file_path and os.path.exists(file_path):
+            os.remove(file_path)
+        raise
     except Exception as e:
+        if file_path and os.path.exists(file_path):
+            os.remove(file_path)
         logger.error(f"Upload failed: {e}")
         raise HTTPException(status_code=500, detail=f"Ingestion failed: {str(e)}")
+    finally:
+        await file.close()
 
 
 @app.get("/documents", response_model=list[DocumentInfo])
-async def get_documents():
+async def get_documents(user: dict = Depends(verify_jwt_token)):
     """List all ingested documents."""
     try:
         docs = await asyncio.to_thread(list_documents)
@@ -257,8 +308,25 @@ async def get_documents():
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@app.get("/documents/{filename}/file")
+async def get_document_file(filename: str, user: dict = Depends(verify_jwt_token)):
+    """Stream an uploaded PDF for inline viewing."""
+    safe_filename = _sanitize_filename(filename)
+    file_path = os.path.join(get_settings().upload_dir, safe_filename)
+
+    if not os.path.exists(file_path):
+        raise HTTPException(status_code=404, detail=f"Document '{safe_filename}' not found.")
+
+    return FileResponse(
+        file_path,
+        media_type="application/pdf",
+        filename=safe_filename,
+        content_disposition_type="inline",
+    )
+
+
 @app.delete("/documents/{filename}", response_model=DeleteResponse)
-async def remove_document(filename: str):
+async def remove_document(filename: str, user: dict = Depends(verify_jwt_token)):
     """Delete a document from the knowledge base."""
     try:
         result = await asyncio.to_thread(delete_document, filename)

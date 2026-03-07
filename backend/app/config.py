@@ -4,6 +4,7 @@ Loads all environment variables via pydantic-settings.
 """
 
 from pydantic_settings import BaseSettings
+from pydantic import Field
 from functools import lru_cache
 
 
@@ -20,7 +21,9 @@ class Settings(BaseSettings):
 
     # ─── CORS & Security ─────────────────────────────
     cors_origins: str = "http://localhost:3000,https://finguard.projects.emrecanik.com"
-    api_jwt_secret: str = "super-secret-finguard-key-change-in-prod"
+    api_jwt_secret: str = Field(..., min_length=32)
+    api_jwt_issuer: str = Field(..., min_length=1)
+    api_jwt_audience: str = Field(..., min_length=1)
 
     # ─── Embedding ───────────────────────────────────
     embedding_model: str = "intfloat/multilingual-e5-small"
@@ -46,6 +49,7 @@ class Settings(BaseSettings):
     rag_rerank_top_n: int = 3    # Prompt-aligned final context size
     chunk_size: int = 1200       # Larger chunks for article-aware
     chunk_overlap: int = 200
+    max_upload_bytes: int = 25_000_000
 
     model_config = {"env_file": ".env", "env_file_encoding": "utf-8"}
 

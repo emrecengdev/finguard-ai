@@ -1,381 +1,597 @@
 "use client";
 
-import { memo, useMemo } from "react";
-import { motion, AnimatePresence } from "framer-motion";
+import { memo, useEffect, useMemo, useState } from "react";
+import { motion, useReducedMotion } from "framer-motion";
 import {
-    Route,
-    BookOpen,
-    Wrench,
-    PenTool,
-    ShieldCheck,
-    CheckCircle2,
-    XCircle,
-    type LucideIcon,
-    AlertTriangle,
+  Activity,
+  AlertTriangle,
+  BookOpen,
+  CheckCircle2,
+  Clock3,
+  PenTool,
+  Route,
+  ShieldCheck,
+  Sparkles,
+  Wrench,
+  XCircle,
+  type LucideIcon,
 } from "lucide-react";
-import type { AgentStep } from "@/lib/api";
-import { t, type TranslationKey, type Locale } from "@/lib/i18n";
 
-// ─── Types ──────────────────────────────────────────────────────
+import { Progress } from "@/components/ui/progress";
+import type { AgentStep } from "@/lib/api";
+import { t, type Locale, type TranslationKey } from "@/lib/i18n";
+import { cn } from "@/lib/utils";
+
+type NodeState = "idle" | "processing" | "success" | "warning" | "error";
+type VisualStep = AgentStep & { receivedAt?: number };
+
+interface PipelineStageTone {
+  accentText: string;
+  surfaceClass: string;
+  ringClass: string;
+}
 
 interface PipelineStage {
-    id: string;
-    icon: LucideIcon;
-    labelKey: TranslationKey;
-    colorClass: string;
-    shadowColor: string;
+  id: string;
+  icon: LucideIcon;
+  labelKey: TranslationKey;
+  tone: PipelineStageTone;
+}
+
+interface ProcessedStage {
+  stage: PipelineStage;
+  state: NodeState;
+  rawStatus: AgentStep["status"] | null;
+  detail: string | null;
+}
+
+interface StageCopy {
+  summary: string;
+  meta: string;
 }
 
 const STAGES: PipelineStage[] = [
-    {
-        id: "router",
-        icon: Route,
-        labelKey: "agent.router",
-        colorClass: "text-violet-500",
-        shadowColor: "rgba(139, 92, 246, 0.4)",
+  {
+    id: "router",
+    icon: Route,
+    labelKey: "agent.router",
+    tone: {
+      accentText: "text-indigo-700 dark:text-indigo-300",
+      surfaceClass: "border-indigo-200/90 bg-indigo-50/90 dark:border-indigo-400/18 dark:bg-indigo-500/10",
+      ringClass: "bg-indigo-500/10 text-indigo-600 ring-indigo-200/90 dark:bg-indigo-400/12 dark:text-indigo-300 dark:ring-indigo-400/18",
     },
-    {
-        id: "rag",
-        icon: BookOpen,
-        labelKey: "agent.knowledge",
-        colorClass: "text-cyan-500",
-        shadowColor: "rgba(6, 182, 212, 0.4)",
+  },
+  {
+    id: "rag",
+    icon: BookOpen,
+    labelKey: "agent.knowledge",
+    tone: {
+      accentText: "text-sky-700 dark:text-sky-300",
+      surfaceClass: "border-sky-200/90 bg-sky-50/90 dark:border-sky-400/18 dark:bg-sky-500/10",
+      ringClass: "bg-sky-500/10 text-sky-600 ring-sky-200/90 dark:bg-sky-400/12 dark:text-sky-300 dark:ring-sky-400/18",
     },
-    {
-        id: "tool",
-        icon: Wrench,
-        labelKey: "agent.tool",
-        colorClass: "text-amber-500",
-        shadowColor: "rgba(245, 158, 11, 0.4)",
+  },
+  {
+    id: "tool",
+    icon: Wrench,
+    labelKey: "agent.tool",
+    tone: {
+      accentText: "text-amber-700 dark:text-amber-300",
+      surfaceClass: "border-amber-200/90 bg-amber-50/90 dark:border-amber-400/18 dark:bg-amber-500/10",
+      ringClass: "bg-amber-500/10 text-amber-600 ring-amber-200/90 dark:bg-amber-400/12 dark:text-amber-300 dark:ring-amber-400/18",
     },
-    {
-        id: "synthesizer",
-        icon: PenTool,
-        labelKey: "agent.synthesizer",
-        colorClass: "text-emerald-500",
-        shadowColor: "rgba(16, 185, 129, 0.4)",
+  },
+  {
+    id: "synthesizer",
+    icon: PenTool,
+    labelKey: "agent.synthesizer",
+    tone: {
+      accentText: "text-emerald-700 dark:text-emerald-300",
+      surfaceClass: "border-emerald-200/90 bg-emerald-50/90 dark:border-emerald-400/18 dark:bg-emerald-500/10",
+      ringClass: "bg-emerald-500/10 text-emerald-600 ring-emerald-200/90 dark:bg-emerald-400/12 dark:text-emerald-300 dark:ring-emerald-400/18",
     },
-    {
-        id: "guardrail",
-        icon: ShieldCheck,
-        labelKey: "agent.guardrail",
-        colorClass: "text-teal-500",
-        shadowColor: "rgba(20, 184, 166, 0.4)",
+  },
+  {
+    id: "guardrail",
+    icon: ShieldCheck,
+    labelKey: "agent.guardrail",
+    tone: {
+      accentText: "text-teal-700 dark:text-teal-300",
+      surfaceClass: "border-teal-200/90 bg-teal-50/90 dark:border-teal-400/18 dark:bg-teal-500/10",
+      ringClass: "bg-teal-500/10 text-teal-600 ring-teal-200/90 dark:bg-teal-400/12 dark:text-teal-300 dark:ring-teal-400/18",
     },
+  },
 ];
 
-const STATUS_KEY_MAP: Record<string, TranslationKey> = {
-    analyzing: "agent_status.analyzing",
-    searching: "agent_status.searching",
-    executing: "agent_status.executing",
-    composing: "agent_status.composing",
-    checking: "agent_status.checking",
-    complete: "agent_status.complete",
-    error: "agent_status.error",
-    flagged: "agent_status.flagged",
-    skipped: "agent_status.skipped",
+const ALWAYS_VISIBLE_STAGE_IDS = ["router", "rag", "synthesizer", "guardrail"];
+
+const STATUS_KEY_MAP: Record<AgentStep["status"], TranslationKey> = {
+  analyzing: "agent_status.analyzing",
+  searching: "agent_status.searching",
+  executing: "agent_status.executing",
+  composing: "agent_status.composing",
+  checking: "agent_status.checking",
+  complete: "agent_status.complete",
+  error: "agent_status.error",
+  flagged: "agent_status.flagged",
+  skipped: "agent_status.skipped",
 };
 
-type NodeState = "idle" | "processing" | "success" | "warning" | "error";
+const PSEUDO_STATUS_BY_STAGE: Record<string, AgentStep["status"]> = {
+  router: "analyzing",
+  rag: "searching",
+  tool: "executing",
+  synthesizer: "composing",
+  guardrail: "checking",
+};
 
-interface ProcessedStage {
-    stage: PipelineStage;
-    state: NodeState;
-    rawStatus: string | null;
-    detail: string | null;
+function formatElapsed(ms: number): string {
+  const totalSeconds = Math.max(0, Math.floor(ms / 1000));
+  const minutes = Math.floor(totalSeconds / 60);
+  const seconds = totalSeconds % 60;
+  return `${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")}`;
 }
 
-// ─── Helpers ────────────────────────────────────────────────────
+function shortenFilename(value: string): string {
+  const normalized = value.trim();
+  if (!normalized) return "";
+  if (normalized.length <= 28) return normalized;
+  return `${normalized.slice(0, 25)}...`;
+}
 
-function determineStage(
-    stageId: string,
-    steps: AgentStep[],
-    allAllowedIds: string[]
-): ProcessedStage {
-    const stage = STAGES.find((s) => s.id === stageId)!;
-    const step = steps.find((s) => s.node === stageId);
+function extractSources(detail: string): string[] {
+  const match = detail.match(/from:\s*(.+)$/i);
+  if (!match) return [];
 
-    if (!step) {
-        // Check if a subsequent stage in the pipeline is active/done. If so, this was implicitly completed or fast-tracked.
-        const myIdx = allAllowedIds.indexOf(stageId);
-        const hasFollowing = steps.some((s) => allAllowedIds.indexOf(s.node) > myIdx);
-        return {
-            stage,
-            state: hasFollowing ? "success" : "idle",
-            rawStatus: null,
-            detail: null,
-        };
+  return Array.from(
+    new Set(
+      match[1]
+        .split(",")
+        .map((item) => item.trim().replace(/\(p\.\d+\)/gi, "").trim())
+        .filter(Boolean),
+    ),
+  ).slice(0, 2);
+}
+
+function summarizeStageDetail(
+  stageId: string,
+  detail: string | null,
+  state: NodeState,
+  locale: Locale,
+): StageCopy {
+  const isTr = locale === "tr";
+
+  if (!detail) {
+    if (state === "idle") {
+      return {
+        summary: isTr ? "Henüz devreye girmedi" : "Not engaged yet",
+        meta: t("chat.pipeline_pending", locale),
+      };
     }
 
-    let state: NodeState = "processing";
-    if (step.status === "error") state = "error";
-    else if (step.status === "flagged") state = "warning";
-    else if (step.status === "complete") state = "success";
-    else if (step.status === "skipped") state = "idle";
+    if (state === "success") {
+      return {
+        summary: isTr ? "Aşama tamamlandı" : "Stage completed",
+        meta: t("chat.pipeline_ready", locale),
+      };
+    }
 
-    return { stage, state, rawStatus: step.status, detail: step.detail || null };
+    return {
+      summary: t("chat.pipeline_waiting", locale),
+      meta: t("chat.pipeline_live", locale),
+    };
+  }
+
+  const normalized = detail.toLowerCase();
+
+  if (stageId === "router") {
+    if (normalized.includes("route: rag")) {
+      return {
+        summary: isTr ? "Belge tabanlı sorguya yönlendirdi" : "Routed the query to document retrieval",
+        meta: isTr ? "Soru, bilgi tabanı sorgusu olarak tanındı" : "Detected a retrieval-based request",
+      };
+    }
+
+    if (normalized.includes("route: tool")) {
+      return {
+        summary: isTr ? "Araç akışını devreye aldı" : "Activated the tool workflow",
+        meta: isTr ? "İşlem gerektiren bir istek belirlendi" : "Detected an action-oriented request",
+      };
+    }
+
+    return {
+      summary: isTr ? "İsteği analiz edip yön seçti" : "Analyzed the request and selected a route",
+      meta: isTr ? "İlk karar katmanı tamamlandı" : "Initial decision layer completed",
+    };
+  }
+
+  if (stageId === "rag") {
+    const countMatch = detail.match(/Found\s+(\d+)/i);
+    const sources = extractSources(detail);
+
+    if (countMatch) {
+      return {
+        summary: isTr
+          ? `${countMatch[1]} ilgili belge parçası bulundu`
+          : `${countMatch[1]} relevant document chunks found`,
+        meta: sources.length > 0
+          ? (isTr ? `Kaynak: ${sources.map(shortenFilename).join(", ")}` : `Source: ${sources.map(shortenFilename).join(", ")}`)
+          : (isTr ? "Kaynak belgeler hazırlandı" : "Source documents prepared"),
+      };
+    }
+
+    if (normalized.includes("no relevant")) {
+      return {
+        summary: isTr ? "Eşleşen belge içeriği bulunamadı" : "No matching document content found",
+        meta: isTr ? "Sorgu ile ilgili parça dönmedi" : "No relevant chunks were returned",
+      };
+    }
+
+    if (normalized.includes("failed")) {
+      return {
+        summary: isTr ? "Bilgi tabanı sorgusu başarısız" : "Retrieval step failed",
+        meta: isTr ? "Belge parçası alınamadı" : "Document chunks could not be fetched",
+      };
+    }
+  }
+
+  if (stageId === "tool") {
+    if (normalized.startsWith("error")) {
+      return {
+        summary: isTr ? "Araç çalıştırması başarısız" : "Tool execution failed",
+        meta: isTr ? "İşlem tekrar denenmeli" : "The action should be retried",
+      };
+    }
+
+    return {
+      summary: isTr ? "Araç çalıştırması tamamlandı" : "Tool execution completed",
+      meta: isTr ? "İşlem sonucu yanıta aktarıldı" : "Result forwarded to the response",
+    };
+  }
+
+  if (stageId === "synthesizer") {
+    if (normalized.includes("error")) {
+      return {
+        summary: isTr ? "Yanıt üretimi başarısız" : "Response generation failed",
+        meta: isTr ? "Kaynaklı yanıt kurulamadı" : "Grounded response could not be composed",
+      };
+    }
+
+    return {
+      summary: isTr ? "Kaynaklı yanıt oluşturdu" : "Composed a grounded response",
+      meta: isTr ? "Belgelere dayalı çıktı hazırlandı" : "Prepared a response grounded in documents",
+    };
+  }
+
+  if (stageId === "guardrail") {
+    if (normalized.includes("passed")) {
+      return {
+        summary: isTr ? "Uyum kontrolünden geçti" : "Passed the compliance check",
+        meta: isTr ? "Yanıt paylaşılmaya uygun" : "The response is safe to show",
+      };
+    }
+
+    if (normalized.includes("flagged")) {
+      return {
+        summary: isTr ? "Uyum uyarısı oluşturdu" : "Raised a compliance warning",
+        meta: isTr ? "Yanıt ek gözden geçirme istiyor" : "The response needs additional review",
+      };
+    }
+
+    if (normalized.includes("failed") || normalized.includes("blocked")) {
+      return {
+        summary: isTr ? "Uyum doğrulaması tamamlanamadı" : "Compliance verification could not finish",
+        meta: isTr ? "Yanıt güvenlik nedeniyle sınırlandı" : "The response was constrained for safety",
+      };
+    }
+  }
+
+  return {
+    summary: detail,
+    meta: isTr ? "Sistem çıktısı" : "System output",
+  };
 }
 
-// ─── SVG + Framer Motion Extracted Components ───────────────────
+function determineStage(
+  stageId: string,
+  steps: VisualStep[],
+  allAllowedIds: string[],
+): ProcessedStage {
+  const stage = STAGES.find((candidate) => candidate.id === stageId)!;
+  const step = steps.find((candidate) => candidate.node === stageId);
 
-const NodeSVG = memo(function NodeSVG({
+  if (!step) {
+    const myIndex = allAllowedIds.indexOf(stageId);
+    const hasFollowing = steps.some((candidate) => allAllowedIds.indexOf(candidate.node) > myIndex);
+
+    return {
+      stage,
+      state: hasFollowing ? "success" : "idle",
+      rawStatus: null,
+      detail: null,
+    };
+  }
+
+  let state: NodeState = "processing";
+  if (step.status === "error") state = "error";
+  else if (step.status === "flagged") state = "warning";
+  else if (step.status === "complete") state = "success";
+  else if (step.status === "skipped") state = "idle";
+
+  return {
+    stage,
     state,
-    colorClass,
-    shadowColor,
-    icon: Icon,
-}: {
-    state: NodeState;
-    colorClass: string;
-    shadowColor: string;
-    icon: LucideIcon;
-}) {
-    const isProc = state === "processing";
-    const isSucc = state === "success";
-    const isWarn = state === "warning";
-    const isErr = state === "error";
+    rawStatus: step.status,
+    detail: step.detail || null,
+  };
+}
 
-    const colorStr = isErr ? "text-rose-500" : isWarn ? "text-amber-500" : colorClass;
-    const filterStyle =
-        isProc || isSucc || isWarn || isErr
-            ? { filter: `drop-shadow(0 0 8px ${isErr ? "rgba(244,63,94,0.5)" : isWarn ? "rgba(245,158,11,0.5)" : shadowColor})` }
-            : {};
+function badgeClasses(state: NodeState) {
+  switch (state) {
+    case "success":
+      return "border-emerald-200/90 bg-emerald-500/10 text-emerald-700 dark:border-emerald-400/20 dark:bg-emerald-400/10 dark:text-emerald-300";
+    case "warning":
+      return "border-amber-200/90 bg-amber-500/10 text-amber-700 dark:border-amber-400/20 dark:bg-amber-400/10 dark:text-amber-300";
+    case "error":
+      return "border-rose-200/90 bg-rose-500/10 text-rose-700 dark:border-rose-400/20 dark:bg-rose-400/10 dark:text-rose-300";
+    case "processing":
+      return "border-sky-200/90 bg-sky-500/10 text-sky-700 dark:border-sky-400/20 dark:bg-sky-400/10 dark:text-sky-300";
+    default:
+      return "border-slate-200/90 bg-white/78 text-slate-500 dark:border-white/[0.06] dark:bg-white/[0.04] dark:text-slate-400";
+  }
+}
 
-    return (
-        <div className={`relative flex size-12 items-center justify-center ${colorStr}`}>
-            {/* Liquid glass background core */}
-            <div
-                className={`absolute inset-0.5 rounded-full backdrop-blur-md transition-colors duration-700 ${isErr
-                        ? "bg-rose-500/10"
-                        : isWarn
-                            ? "bg-amber-500/10"
-                            : isSucc || isProc
-                                ? "bg-current/10"
-                                : "bg-muted/40"
-                    }`}
-            />
+function stateIcon(state: NodeState) {
+  if (state === "success") return CheckCircle2;
+  if (state === "warning") return AlertTriangle;
+  if (state === "error") return XCircle;
+  if (state === "processing") return Activity;
+  return Sparkles;
+}
 
-            {/* Main SVG Vector Layer */}
-            <svg
-                className="absolute inset-0 size-12 overflow-visible"
-                viewBox="0 0 48 48"
-                style={filterStyle}
-            >
-                {/* Base track */}
-                <circle cx="24" cy="24" r="22" className="fill-none stroke-border/50" strokeWidth="1" />
+function getStatusLabel(stage: ProcessedStage, locale: Locale) {
+  if (stage.rawStatus) {
+    return t(STATUS_KEY_MAP[stage.rawStatus], locale);
+  }
 
-                <AnimatePresence>
-                    {/* Active dashed orbiting ring */}
-                    {isProc && (
-                        <motion.circle
-                            key="proc-ring"
-                            cx="24"
-                            cy="24"
-                            r="22"
-                            className="fill-none stroke-current"
-                            strokeWidth="1.5"
-                            strokeDasharray="6 6"
-                            initial={{ opacity: 0, rotate: -90 }}
-                            animate={{ opacity: 1, rotate: 270 }}
-                            exit={{ opacity: 0 }}
-                            transition={{
-                                rotate: { duration: 3, repeat: Infinity, ease: "linear" },
-                                opacity: { duration: 0.3 }
-                            }}
-                            style={{ originX: "24px", originY: "24px" }}
-                        />
-                    )}
+  if (stage.state === "processing") return t("chat.pipeline_live", locale);
+  if (stage.state === "success") return t("agent_status.complete", locale);
 
-                    {/* Complete solid wrapping ring */}
-                    {(isSucc || isWarn || isErr) && (
-                        <motion.circle
-                            key="done-ring"
-                            cx="24"
-                            cy="24"
-                            r="22"
-                            className="fill-none stroke-current"
-                            strokeWidth="1.5"
-                            strokeDasharray="140" // ~2*pi*22 = 138.2
-                            initial={{ strokeDashoffset: 140 }}
-                            animate={{ strokeDashoffset: 0 }}
-                            transition={{ duration: 0.8, ease: "anticipate" }}
-                        />
-                    )}
-
-                    {/* Micro-animations: Orbiting data particles when processing */}
-                    {isProc && (
-                        <motion.g
-                            key="particles"
-                            animate={{ rotate: 360 }}
-                            transition={{ duration: 2, repeat: Infinity, ease: "linear" }}
-                            style={{ originX: "24px", originY: "24px" }}
-                        >
-                            <circle cx="24" cy="2" r="2" className="fill-current" />
-                            <circle cx="24" cy="46" r="1.5" className="fill-current opacity-60" />
-                        </motion.g>
-                    )}
-                </AnimatePresence>
-            </svg>
-
-            {/* Internal Icon with morph transitions */}
-            <AnimatePresence mode="wait">
-                <motion.div
-                    key={isSucc ? "succ" : isErr ? "err" : isWarn ? "warn" : "icon"}
-                    initial={{ scale: 0.3, opacity: 0, rotate: -45 }}
-                    animate={{ scale: 1, opacity: 1, rotate: 0 }}
-                    exit={{ scale: 0.3, opacity: 0, rotate: 45 }}
-                    transition={{ type: "spring", stiffness: 300, damping: 20 }}
-                    className="relative z-10"
-                >
-                    {isSucc ? (
-                        <CheckCircle2 className="size-4.5" strokeWidth={2.5} />
-                    ) : isErr ? (
-                        <XCircle className="size-4.5" strokeWidth={2.5} />
-                    ) : isWarn ? (
-                        <AlertTriangle className="size-4.5" strokeWidth={2.5} />
-                    ) : (
-                        <Icon className={`size-4.5 ${state === "idle" ? "text-muted-foreground/50" : "text-current"}`} strokeWidth={1.5} />
-                    )}
-                </motion.div>
-            </AnimatePresence>
-        </div>
-    );
-});
-
-const ConnectionLine = memo(function ConnectionLine({
-    fromState,
-    toState,
-    fromColor,
-}: {
-    fromState: NodeState;
-    toState: NodeState;
-    fromColor: string;
-}) {
-    const isFilled = fromState !== "idle" && fromState !== "processing";
-    const isActiveConnection = isFilled && toState === "processing";
-
-    return (
-        <div className={`relative flex h-12 flex-1 items-center px-2 ${fromColor}`}>
-            <svg className="h-[2px] w-full overflow-visible" preserveAspectRatio="none">
-                {/* Subdued base rail */}
-                <line x1="0" y1="1" x2="100%" y2="1" className="stroke-border/50" strokeWidth="2" />
-
-                {/* Painted rail */}
-                <motion.line
-                    x1="0" y1="1" x2="100%" y2="1"
-                    className="stroke-current"
-                    strokeWidth="2"
-                    initial={{ pathLength: 0 }}
-                    animate={{ pathLength: isFilled ? 1 : 0 }}
-                    transition={{ duration: 0.8, ease: "anticipate" }}
-                />
-
-                {/* Traveling signal burst (micro-animation) */}
-                <AnimatePresence>
-                    {isActiveConnection && (
-                        <motion.g
-                            initial={{ x: "0%" }}
-                            animate={{ x: "100%" }}
-                            exit={{ opacity: 0 }}
-                            transition={{ duration: 1.2, repeat: Infinity, ease: "linear" }}
-                        >
-                            <circle
-                                cx="0" cy="1" r="2.5"
-                                className="fill-current"
-                                style={{ filter: "drop-shadow(0 0 5px currentColor)" }}
-                            />
-                            {/* Comet tail effect */}
-                            <line x1="-15" y1="1" x2="0" y2="1" className="stroke-current" strokeWidth="2" opacity="0.3" />
-                        </motion.g>
-                    )}
-                </AnimatePresence>
-            </svg>
-        </div>
-    );
-});
-
-// ─── Main Visualizer Component ──────────────────────────────────
+  return t("chat.pipeline_pending", locale);
+}
 
 export const PipelineVisualizer = memo(function PipelineVisualizer({
-    steps,
-    locale,
+  steps,
+  locale,
+  isStreaming = false,
+  startedAt,
 }: {
-    steps: AgentStep[];
-    locale: Locale;
+  steps: VisualStep[];
+  locale: Locale;
+  isStreaming?: boolean;
+  startedAt?: Date;
 }) {
-    const activeIds = useMemo(() => {
-        const s = new Set(steps.map((x) => x.node));
-        return STAGES.filter((x) => x.id === "router" || x.id === "synthesizer" || x.id === "guardrail" || s.has(x.id)).map(x => x.id);
-    }, [steps]);
+  const reduceMotion = useReducedMotion();
+  const [now, setNow] = useState(() => Date.now());
 
-    const stagesData = useMemo(() => {
-        return activeIds.map((id) => determineStage(id, steps, activeIds));
-    }, [activeIds, steps]);
+  useEffect(() => {
+    if (!isStreaming) return;
 
-    return (
-        <motion.div
-            initial={{ opacity: 0, y: 4, filter: "blur(4px)" }}
-            animate={{ opacity: 1, y: 0, filter: "blur(0px)" }}
-            transition={{ type: "spring", stiffness: 350, damping: 30 }}
-            className="relative w-full overflow-hidden rounded-2xl border border-border/60 bg-gradient-to-br from-card/80 to-muted/20 px-4 py-6 shadow-[inset_0_1px_0_rgba(255,255,255,0.1)] backdrop-blur-xl"
-        >
-            <div className="flex items-start justify-between">
-                {stagesData.map((data, i) => (
-                    <div key={data.stage.id} className="flex min-w-0 flex-1 items-start">
-                        <div className="flex flex-col items-center">
-                            {/* Node Hex/Circle */}
-                            <NodeSVG
-                                state={data.state}
-                                icon={data.stage.icon}
-                                colorClass={data.stage.colorClass}
-                                shadowColor={data.stage.shadowColor}
-                            />
+    const timer = window.setInterval(() => {
+      setNow(Date.now());
+    }, 1000);
 
-                            {/* Text Labels */}
-                            <div className="mt-3 flex flex-col items-center text-center">
-                                <span className={`font-mono text-[9px] font-bold uppercase tracking-[0.15em] ${data.state === "idle" ? "text-muted-foreground/40" : data.stage.colorClass}`}>
-                                    {t(data.stage.labelKey, locale)}
-                                </span>
+    return () => {
+      window.clearInterval(timer);
+    };
+  }, [isStreaming]);
 
-                                <div className="relative mt-1 h-3 w-16 overflow-hidden">
-                                    <AnimatePresence mode="popLayout">
-                                        {data.state === "processing" && data.rawStatus && (
-                                            <motion.span
-                                                key="proc"
-                                                initial={{ y: 15, opacity: 0 }}
-                                                animate={{ y: 0, opacity: 1 }}
-                                                exit={{ y: -15, opacity: 0 }}
-                                                className="absolute inset-0 block text-[9px] font-medium text-muted-foreground"
-                                            >
-                                                {STATUS_KEY_MAP[data.rawStatus] ? t(STATUS_KEY_MAP[data.rawStatus], locale) : data.rawStatus}...
-                                            </motion.span>
-                                        )}
-                                        {data.detail && (data.state === "success" || data.state === "error") && (
-                                            <motion.span
-                                                key="det"
-                                                initial={{ y: 15, opacity: 0 }}
-                                                animate={{ y: 0, opacity: 1 }}
-                                                className="absolute inset-0 block truncate px-1 text-[9px] text-muted-foreground/60"
-                                                title={data.detail}
-                                            >
-                                                {data.detail}
-                                            </motion.span>
-                                        )}
-                                    </AnimatePresence>
-                                </div>
-                            </div>
-                        </div>
+  const activeIds = useMemo(() => {
+    if (steps.length === 0) return ALWAYS_VISIBLE_STAGE_IDS;
 
-                        {/* Connection Line */}
-                        {i < stagesData.length - 1 && (
-                            <ConnectionLine
-                                fromState={data.state}
-                                toState={stagesData[i + 1].state}
-                                fromColor={data.stage.colorClass}
-                            />
-                        )}
-                    </div>
-                ))}
-            </div>
-        </motion.div>
+    const seen = new Set(steps.map((step) => step.node));
+    return STAGES.filter(
+      (stage) => ALWAYS_VISIBLE_STAGE_IDS.includes(stage.id) || seen.has(stage.id),
+    ).map((stage) => stage.id);
+  }, [steps]);
+
+  const actualStages = useMemo(
+    () => activeIds.map((id) => determineStage(id, steps, activeIds)),
+    [activeIds, steps],
+  );
+
+  const startedAtMs = startedAt?.getTime() ?? steps[0]?.receivedAt ?? now;
+  const elapsedMs = Math.max(0, now - startedAtMs);
+
+  const displayedStages = useMemo(() => {
+    if (!(isStreaming && steps.length === 0)) return actualStages;
+
+    const stageIndex = Math.min(
+      Math.floor(elapsedMs / 2000),
+      actualStages.length - 1,
     );
+
+    return actualStages.map((entry, index) => {
+      if (index < stageIndex) {
+        return {
+          ...entry,
+          state: "success" as const,
+          rawStatus: "complete" as const,
+        };
+      }
+
+      if (index === stageIndex) {
+        return {
+          ...entry,
+          state: "processing" as const,
+          rawStatus: PSEUDO_STATUS_BY_STAGE[entry.stage.id] ?? "analyzing",
+          detail: t("chat.pipeline_waiting", locale),
+        };
+      }
+
+      return entry;
+    });
+  }, [actualStages, elapsedMs, isStreaming, locale, steps.length]);
+
+  const stageCards = useMemo(() => {
+    return displayedStages.map((entry) => ({
+      ...entry,
+      copy: summarizeStageDetail(entry.stage.id, entry.detail, entry.state, locale),
+    }));
+  }, [displayedStages, locale]);
+
+  const progressValue = useMemo(() => {
+    if (stageCards.length === 0) return 0;
+
+    if (isStreaming && steps.length === 0) {
+      const stageIndex = Math.min(Math.floor(elapsedMs / 2000), stageCards.length - 1);
+      const stageProgress = (elapsedMs % 2000) / 2000;
+      return ((stageIndex + 0.15 + stageProgress * 0.5) / stageCards.length) * 100;
+    }
+
+    const completed = stageCards.filter((stage) =>
+      ["success", "warning", "error"].includes(stage.state),
+    ).length;
+    const processing = stageCards.some((stage) => stage.state === "processing") ? 0.35 : 0;
+
+    if (!isStreaming) {
+      return completed === stageCards.length ? 100 : ((completed + processing) / stageCards.length) * 100;
+    }
+
+    return Math.max(12, ((completed + processing) / stageCards.length) * 100);
+  }, [elapsedMs, isStreaming, stageCards, steps.length]);
+
+  const liveStage = stageCards.find((stage) => stage.state === "processing")
+    ?? [...stageCards].reverse().find((stage) => stage.state !== "idle")
+    ?? stageCards[0];
+
+  const leadKey = isStreaming ? "chat.pipeline_current" : "chat.pipeline_latest";
+  const leadSummary = liveStage?.copy.summary ?? t("chat.pipeline_waiting", locale);
+  const leadMeta = liveStage?.copy.meta ?? t("chat.pipeline_ready", locale);
+
+  return (
+    <motion.section
+      initial={reduceMotion ? false : { opacity: 0, y: 8 }}
+      animate={{ opacity: 1, y: 0 }}
+      transition={{ duration: 0.28, ease: "easeOut" }}
+      className="relative overflow-hidden rounded-[26px] border border-slate-200/80 bg-white/78 p-4 shadow-[0_18px_50px_-32px_rgba(15,23,42,0.35)] backdrop-blur-lg dark:border-white/[0.07] dark:bg-[#0f172a]/68 dark:shadow-[0_24px_60px_-34px_rgba(2,6,23,0.78)]"
+    >
+      <div className="pointer-events-none absolute inset-0 bg-[radial-gradient(circle_at_top_right,rgba(59,130,246,0.10),transparent_34%),radial-gradient(circle_at_bottom_left,rgba(16,185,129,0.08),transparent_30%)] dark:bg-[radial-gradient(circle_at_top_right,rgba(56,189,248,0.14),transparent_32%),radial-gradient(circle_at_bottom_left,rgba(16,185,129,0.10),transparent_24%)]" />
+
+      <div className="relative">
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <div className="min-w-0">
+            <div className="text-[11px] font-semibold uppercase tracking-[0.24em] text-slate-500 dark:text-slate-400">
+              {t("chat.pipeline_title", locale)}
+            </div>
+            <div className="mt-1 flex flex-wrap items-center gap-2">
+              <span className="text-sm font-semibold tracking-tight text-slate-900 dark:text-slate-50">
+                {isStreaming ? t("chat.pipeline_live", locale) : t("chat.pipeline_done", locale)}
+              </span>
+              <span
+                className={cn(
+                  "inline-flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-[11px] font-medium",
+                  isStreaming
+                    ? "border-sky-200/90 bg-sky-500/10 text-sky-700 dark:border-sky-400/20 dark:bg-sky-400/10 dark:text-sky-300"
+                    : "border-emerald-200/90 bg-emerald-500/10 text-emerald-700 dark:border-emerald-400/20 dark:bg-emerald-400/10 dark:text-emerald-300",
+                )}
+              >
+                <span className={cn("size-1.5 rounded-full", isStreaming ? "bg-sky-500" : "bg-emerald-500")} />
+                {isStreaming ? t("chat.pipeline_live", locale) : t("chat.pipeline_ready", locale)}
+              </span>
+            </div>
+          </div>
+
+          <div className="flex items-center gap-2 rounded-full border border-slate-200/80 bg-white/76 px-3 py-1.5 text-xs font-medium text-slate-600 shadow-sm dark:border-white/[0.06] dark:bg-white/[0.04] dark:text-slate-300">
+            <Clock3 className="size-3.5" strokeWidth={1.8} />
+            <span>{t("chat.pipeline_elapsed", locale)}</span>
+            <span className="font-mono text-slate-900 dark:text-slate-100">
+              {formatElapsed(elapsedMs)}
+            </span>
+          </div>
+        </div>
+
+        <div className="mt-4">
+          <Progress
+            value={progressValue}
+            aria-label={t("chat.pipeline_title", locale)}
+            className="h-2.5 border border-white/50 bg-slate-200/90 shadow-[inset_0_1px_0_rgba(255,255,255,0.78)] dark:border-white/[0.06] dark:bg-white/[0.06]"
+          />
+        </div>
+
+        <div className="mt-4 grid gap-3 md:grid-cols-2 2xl:grid-cols-4">
+          {stageCards.map((entry) => {
+            const StatusIcon = stateIcon(entry.state);
+            const longLabel = locale === "tr"
+              ? `${t(entry.stage.labelKey, locale)} Ajanı`
+              : `${t(entry.stage.labelKey, locale)} Agent`;
+
+            return (
+              <article
+                key={entry.stage.id}
+                className={cn(
+                  "min-h-[148px] rounded-[22px] border p-3.5",
+                  entry.state === "idle"
+                    ? "border-slate-200/85 bg-white/72 dark:border-white/[0.06] dark:bg-white/[0.04]"
+                    : entry.stage.tone.surfaceClass,
+                )}
+              >
+                <div className="flex items-start justify-between gap-3">
+                  <div
+                    className={cn(
+                      "flex size-10 shrink-0 items-center justify-center rounded-2xl ring-1",
+                      entry.state === "idle"
+                        ? "bg-slate-100 text-slate-500 ring-slate-200 dark:bg-white/[0.06] dark:text-slate-400 dark:ring-white/[0.05]"
+                        : entry.stage.tone.ringClass,
+                    )}
+                  >
+                    <entry.stage.icon className="size-4.5" strokeWidth={1.9} />
+                  </div>
+
+                  <span className={cn("inline-flex items-center gap-1 rounded-full border px-2 py-1 text-[10px] font-semibold whitespace-nowrap", badgeClasses(entry.state))}>
+                    <StatusIcon className="size-3" strokeWidth={2} />
+                    {getStatusLabel(entry, locale)}
+                  </span>
+                </div>
+
+                <div className="mt-4">
+                  <div className={cn("text-[11px] font-semibold uppercase tracking-[0.22em]", entry.state === "idle" ? "text-slate-400 dark:text-slate-500" : entry.stage.tone.accentText)}>
+                    {longLabel}
+                  </div>
+                  <div className="mt-1 line-clamp-2 text-sm font-semibold leading-snug text-slate-900 dark:text-slate-100">
+                    {entry.copy.summary}
+                  </div>
+                  <div className="mt-1.5 line-clamp-2 text-xs leading-relaxed text-slate-600 dark:text-slate-300/88">
+                    {entry.copy.meta}
+                  </div>
+                </div>
+              </article>
+            );
+          })}
+        </div>
+
+        <div className="mt-4 flex items-start gap-3 rounded-[22px] border border-slate-200/80 bg-white/76 px-4 py-3 shadow-[inset_0_1px_0_rgba(255,255,255,0.72)] dark:border-white/[0.06] dark:bg-white/[0.04]">
+          <div className="flex size-9 shrink-0 items-center justify-center rounded-2xl bg-slate-900 text-white shadow-sm dark:bg-slate-100 dark:text-slate-900">
+            {liveStage ? (
+              <liveStage.stage.icon className="size-4.5" strokeWidth={1.9} />
+            ) : (
+              <Sparkles className="size-4.5" strokeWidth={1.9} />
+            )}
+          </div>
+
+          <div className="min-w-0">
+            <div className="text-[11px] font-semibold uppercase tracking-[0.22em] text-slate-500 dark:text-slate-400">
+              {t(leadKey, locale)}
+            </div>
+            <div className="mt-1 text-sm font-semibold leading-snug text-slate-900 dark:text-slate-100">
+              {leadSummary}
+            </div>
+            <div className="mt-1 text-xs leading-relaxed text-slate-600 dark:text-slate-300/88">
+              {leadMeta}
+            </div>
+          </div>
+        </div>
+      </div>
+    </motion.section>
+  );
 });
