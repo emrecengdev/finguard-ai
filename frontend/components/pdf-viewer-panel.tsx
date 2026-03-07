@@ -6,6 +6,7 @@ import { ArrowLeft, ExternalLink, FileText } from "lucide-react";
 import { motion } from "framer-motion";
 
 import type { DocumentInfo } from "@/lib/api";
+import { SAMPLE_DOC_FILENAMES } from "@/lib/sample-documents";
 
 const PdfDocumentView = dynamic(
   () =>
@@ -23,10 +24,18 @@ interface PdfViewerPanelProps {
 }
 
 export function PdfViewerPanel({ document, onClose }: PdfViewerPanelProps) {
-  const pdfUrl = useMemo(
+  const previewUrl = useMemo(
     () => `/api/documents/${encodeURIComponent(document.filename)}/file`,
     [document.filename],
   );
+  const fallbackUrl = useMemo(
+    () =>
+      SAMPLE_DOC_FILENAMES.has(document.filename)
+        ? `/samples/${encodeURIComponent(document.filename)}`
+        : undefined,
+    [document.filename],
+  );
+  const openInNewTabUrl = fallbackUrl ?? previewUrl;
 
   return (
     <motion.section
@@ -77,7 +86,7 @@ export function PdfViewerPanel({ document, onClose }: PdfViewerPanelProps) {
             <span className="hidden sm:inline">Geri</span>
           </button>
           <a
-            href={pdfUrl}
+            href={openInNewTabUrl}
             target="_blank"
             rel="noreferrer"
             className="flex size-9 items-center justify-center rounded-full border border-black/5 bg-white/70 text-slate-600 transition-colors hover:bg-white hover:text-slate-900 dark:border-white/[0.05] dark:bg-white/[0.04] dark:text-slate-300 dark:hover:bg-white/[0.08] dark:hover:text-white"
@@ -90,7 +99,11 @@ export function PdfViewerPanel({ document, onClose }: PdfViewerPanelProps) {
 
       <div className="relative min-h-0 flex-1 p-3">
         <div className="relative h-full min-h-[540px] overflow-hidden rounded-[22px] border border-black/5 bg-slate-50/75 shadow-[inset_0_1px_0_rgba(255,255,255,0.5)] dark:border-white/[0.05] dark:bg-[#020817]">
-          <PdfDocumentView fileUrl={pdfUrl} fileName={document.filename} />
+          <PdfDocumentView
+            fileUrl={previewUrl}
+            fallbackUrl={fallbackUrl}
+            fileName={document.filename}
+          />
         </div>
       </div>
     </motion.section>
