@@ -9,6 +9,8 @@ interface UseVoiceReturn {
     speakingMsgId: string | null;
     /** Whether STT is actively listening */
     isListening: boolean;
+    /** Whether the browser can do speech recognition */
+    canListen: boolean;
     /** Speak a text aloud via ElevenLabs TTS */
     speakText: (text: string, msgId: string) => Promise<void>;
     /** Stop current TTS playback */
@@ -33,6 +35,7 @@ export function useVoice(): UseVoiceReturn {
     const [isSpeaking, setIsSpeaking] = useState(false);
     const [speakingMsgId, setSpeakingMsgId] = useState<string | null>(null);
     const [isListening, setIsListening] = useState(false);
+    const [canListen, setCanListen] = useState(false);
     const audioRef = useRef<HTMLAudioElement | null>(null);
     const audioUrlRef = useRef<string | null>(null);
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -159,6 +162,15 @@ export function useVoice(): UseVoiceReturn {
     );
 
     useEffect(() => {
+        const SR =
+            typeof window !== "undefined"
+                ? (window as unknown as Record<string, unknown>).SpeechRecognition ||
+                (window as unknown as Record<string, unknown>).webkitSpeechRecognition
+                : null;
+        setCanListen(Boolean(SR));
+    }, []);
+
+    useEffect(() => {
         return () => {
             releaseAudioResources();
             const recognition = recognitionRef.current;
@@ -171,6 +183,7 @@ export function useVoice(): UseVoiceReturn {
         isSpeaking,
         speakingMsgId,
         isListening,
+        canListen,
         speakText,
         stopSpeaking,
         startListening,

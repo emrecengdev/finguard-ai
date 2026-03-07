@@ -115,12 +115,16 @@ const translations = {
         en: "Sample Documents",
     },
     "pool.add": {
-        tr: "Ekle",
-        en: "Add",
+        tr: "Bilgi tabanına ekle",
+        en: "Add to knowledge base",
     },
     "pool.adding": {
         tr: "Ekleniyor...",
         en: "Adding...",
+    },
+    "pool.loaded": {
+        tr: "Yüklü",
+        en: "Loaded",
     },
 
     // ─── Agent Steps ──────────────────────────────────
@@ -147,6 +151,12 @@ const translations = {
     // ─── Voice ────────────────────────────────────────
     "voice.listening": { tr: "Dinleniyor...", en: "Listening..." },
     "voice.speaking": { tr: "Okunuyor...", en: "Speaking..." },
+    "voice.dictate": { tr: "Sesli giriş", en: "Voice input" },
+    "voice.tap_to_speak": { tr: "Konuşarak yazdır", en: "Tap to dictate" },
+    "voice.tap_to_stop": { tr: "Dinlemeyi durdur", en: "Tap to stop listening" },
+    "voice.live_hint": { tr: "Konuşun, metne çevirelim", en: "Speak and we will turn it into text" },
+    "voice.play_response": { tr: "Sesli dinle", en: "Play response" },
+    "voice.stop_response": { tr: "Sesi durdur", en: "Stop audio" },
     "voice.not_supported": {
         tr: "Tarayıcınız ses tanımayı desteklemiyor",
         en: "Your browser does not support speech recognition",

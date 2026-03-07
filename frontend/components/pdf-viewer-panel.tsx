@@ -5,8 +5,7 @@ import dynamic from "next/dynamic";
 import { ArrowLeft, ExternalLink, FileText } from "lucide-react";
 import { motion } from "framer-motion";
 
-import type { DocumentInfo } from "@/lib/api";
-import { SAMPLE_DOC_FILENAMES } from "@/lib/sample-documents";
+import { SAMPLE_DOC_FILENAMES, isSamplePreviewDocument, type ViewerDocument } from "@/lib/sample-documents";
 
 const PdfDocumentView = dynamic(
   () =>
@@ -19,11 +18,12 @@ const PdfDocumentView = dynamic(
 );
 
 interface PdfViewerPanelProps {
-  document: DocumentInfo;
+  document: ViewerDocument;
   onClose: () => void;
 }
 
 export function PdfViewerPanel({ document, onClose }: PdfViewerPanelProps) {
+  const isSamplePreview = isSamplePreviewDocument(document);
   const previewUrl = useMemo(
     () => `/api/documents/${encodeURIComponent(document.filename)}/file`,
     [document.filename],
@@ -57,12 +57,20 @@ export function PdfViewerPanel({ document, onClose }: PdfViewerPanelProps) {
             </div>
             <div className="min-w-0">
               <div className="truncate text-sm font-semibold text-slate-900 dark:text-slate-100">
-                {document.filename}
+                {isSamplePreview ? document.label : document.filename}
               </div>
               <div className="mt-1 flex flex-wrap items-center gap-2 text-[11px] text-slate-500 dark:text-slate-400">
+                {isSamplePreview ? (
+                  <>
+                    <span className="truncate">{document.description}</span>
+                    <span className="size-1 rounded-full bg-slate-300 dark:bg-slate-600" />
+                  </>
+                ) : null}
                 <span>{document.pages} sayfa</span>
                 <span className="size-1 rounded-full bg-slate-300 dark:bg-slate-600" />
-                <span>{document.chunks} parça</span>
+                <span>
+                  {isSamplePreview && document.chunks === 0 ? "Önizleme" : `${document.chunks} parça`}
+                </span>
                 {document.pages === 1 ? (
                   <>
                     <span className="size-1 rounded-full bg-slate-300 dark:bg-slate-600" />

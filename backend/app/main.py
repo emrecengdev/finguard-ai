@@ -17,6 +17,7 @@ from fastapi.responses import FileResponse
 from pydantic import BaseModel
 from sse_starlette.sse import EventSourceResponse
 import jwt
+from typing import Literal
 
 from app.config import get_settings
 from app.rag import (
@@ -95,6 +96,7 @@ app.add_middleware(
 class ChatRequest(BaseModel):
     message: str
     session_id: str = "default"
+    locale: Literal["tr", "en"] = "tr"
 
 
 class ChatResponse(BaseModel):
@@ -350,9 +352,14 @@ async def chat(request: ChatRequest, user: dict = Depends(verify_jwt_token)):
         raise HTTPException(status_code=400, detail="Message cannot be empty.")
 
     try:
-        logger.info(f"Chat request: '{request.message[:80]}...' (session: {request.session_id})")
+        logger.info(
+            "Chat request: '%s...' (session: %s, locale: %s)",
+            request.message[:80],
+            request.session_id,
+            request.locale,
+        )
 
-        final_state = await run_graph(request.message)
+        final_state = await run_graph(request.message, request.locale)
 
         # Extract sources from RAG context
         sources = []
@@ -388,7 +395,7 @@ async def chat_stream(request: ChatRequest, user: dict = Depends(verify_jwt_toke
         try:
             # We run the graph and then stream the steps
             # (True streaming would require a custom LangGraph callback handler)
-            final_state = await run_graph(request.message)
+            final_state = await run_graph(request.message, request.locale)
 
             # Stream each agent step
             for step in final_state.get("agent_steps", []):

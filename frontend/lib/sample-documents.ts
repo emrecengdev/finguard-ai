@@ -1,4 +1,44 @@
-export const SAMPLE_DOCS = [
+import type { DocumentInfo } from "@/lib/api";
+
+export interface SampleDocumentDefinition {
+  id: string;
+  name: string;
+  file: string;
+  desc: string;
+  pages: number;
+  tone: "full" | "summary";
+}
+
+export interface SamplePreviewDocument extends DocumentInfo {
+  origin: "sample-library";
+  label: string;
+  description: string;
+  tone: SampleDocumentDefinition["tone"];
+}
+
+export type ViewerDocument = DocumentInfo | SamplePreviewDocument;
+
+export function isSamplePreviewDocument(
+  document: ViewerDocument,
+): document is SamplePreviewDocument {
+  return "origin" in document && document.origin === "sample-library";
+}
+
+export function sampleToViewerDocument(
+  sample: SampleDocumentDefinition,
+): SamplePreviewDocument {
+  return {
+    filename: sample.file,
+    pages: sample.pages,
+    chunks: 0,
+    origin: "sample-library",
+    label: sample.name,
+    description: sample.desc,
+    tone: sample.tone,
+  };
+}
+
+export const SAMPLE_DOCS: SampleDocumentDefinition[] = [
   {
     id: "isg",
     name: "İSG Kanunu",
@@ -26,7 +66,7 @@ export const SAMPLE_DOCS = [
   {
     id: "sendikalar",
     name: "Sendikalar Kanunu",
-    file: "sendikalar-toplu-is-sozlesmesi-kanunu.pdf",
+    file: "sendiklar-toplu-is-sozlesmesi-kanunu.pdf",
     desc: "6356 Sayılı Sendikalar ve Toplu İş",
     pages: 39,
     tone: "full",

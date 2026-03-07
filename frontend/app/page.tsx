@@ -9,13 +9,14 @@ import { Sidebar } from "@/components/sidebar";
 import { Chat } from "@/components/chat";
 import { PdfViewerPanel } from "@/components/pdf-viewer-panel";
 import { getDocuments, healthCheck, type DocumentInfo } from "@/lib/api";
+import { isSamplePreviewDocument, type ViewerDocument } from "@/lib/sample-documents";
 import { cn } from "@/lib/utils";
 import { useAppStore } from "@/store/useAppStore";
 
 export default function Dashboard() {
   const [documents, setDocuments] = useState<DocumentInfo[]>([]);
   const [isBackendOnline, setIsBackendOnline] = useState(false);
-  const [selectedDocument, setSelectedDocument] = useState<DocumentInfo | null>(null);
+  const [selectedDocument, setSelectedDocument] = useState<ViewerDocument | null>(null);
   const { isMobileSidebarOpen, setMobileSidebarOpen } = useAppStore();
 
   useEffect(() => {
@@ -37,6 +38,9 @@ export default function Dashboard() {
           setDocuments(docs);
           setSelectedDocument((current) => {
             if (!current) return current;
+            if (isSamplePreviewDocument(current)) {
+              return docs.find((doc) => doc.filename === current.filename) ?? current;
+            }
             const nextSelected = docs.find((doc) => doc.filename === current.filename);
             return nextSelected ?? null;
           });
@@ -62,6 +66,9 @@ export default function Dashboard() {
         setDocuments(docs);
         setSelectedDocument((current) => {
           if (!current) return current;
+          if (isSamplePreviewDocument(current)) {
+            return docs.find((doc) => doc.filename === current.filename) ?? current;
+          }
           const nextSelected = docs.find((doc) => doc.filename === current.filename);
           return nextSelected ?? null;
         });

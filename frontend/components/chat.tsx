@@ -237,7 +237,7 @@ export function Chat({ documents }: ChatProps) {
   const [isLoading, setIsLoading] = useState(false);
   const scrollRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
-  const { speakingMsgId, isListening, speakText, stopSpeaking, startListening, stopListening } = useVoice();
+  const { speakingMsgId, isListening, canListen, speakText, stopSpeaking, startListening, stopListening } = useVoice();
 
   useEffect(() => {
     if (scrollRef.current) scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
@@ -297,6 +297,7 @@ export function Chat({ documents }: ChatProps) {
       await streamMessage(
         trimmed,
         "default",
+        locale,
         (step) => {
           const enrichedStep: UIAgentStep = {
             ...step,
@@ -587,16 +588,19 @@ export function Chat({ documents }: ChatProps) {
                               </div>
                             )}
                             <button
-                              onClick={() => speakingMsgId === msg.id ? stopSpeaking() : speakText(msg.content, msg.id)}
-                              className={`flex items-center gap-1 px-2 py-0.5 rounded-full text-[11px] transition-all ${speakingMsgId === msg.id
-                                ? "bg-emerald-100 dark:bg-emerald-500/20 text-emerald-700 dark:text-emerald-400"
-                                : "text-muted-foreground/50 hover:text-muted-foreground hover:bg-black/5 dark:hover:bg-white/5"
+                              onClick={() => speakingMsgId === msg.id ? stopSpeaking() : speakText(normalized, msg.id)}
+                              className={`inline-flex items-center gap-2 rounded-full border px-3 py-1.5 text-[11px] font-medium transition-all ${speakingMsgId === msg.id
+                                ? "border-emerald-500/20 bg-emerald-100 text-emerald-700 dark:border-emerald-400/20 dark:bg-emerald-500/20 dark:text-emerald-300"
+                                : "border-black/5 bg-white/70 text-slate-600 hover:bg-white hover:text-slate-900 dark:border-white/[0.06] dark:bg-white/[0.04] dark:text-slate-300 dark:hover:bg-white/[0.08] dark:hover:text-white"
                                 }`}
                             >
+                              <span className={`flex size-5 items-center justify-center rounded-full ${speakingMsgId === msg.id ? "bg-emerald-500/12" : "bg-slate-200/80 dark:bg-white/[0.08]"}`}>
+                                {speakingMsgId === msg.id ? <VolumeX size={12} /> : <Volume2 size={12} />}
+                              </span>
                               {speakingMsgId === msg.id ? (
-                                <><VolumeX size={12} /> {t("voice.speaking", locale)}</>
+                                t("voice.stop_response", locale)
                               ) : (
-                                <Volume2 size={12} />
+                                t("voice.play_response", locale)
                               )}
                             </button>
                           </div>
@@ -619,6 +623,7 @@ export function Chat({ documents }: ChatProps) {
           <div className="absolute right-3 top-3 flex items-center gap-2">
             <button
               onClick={() => {
+                if (!canListen) return;
                 if (isListening) {
                   stopListening();
                 } else {
@@ -628,17 +633,30 @@ export function Chat({ documents }: ChatProps) {
                   });
                 }
               }}
-              className={`flex size-9 items-center justify-center rounded-full border transition-all ${isListening
-                ? "border-emerald-500/50 bg-emerald-100 dark:bg-emerald-500/20 text-emerald-600 dark:text-emerald-400 animate-pulse shadow-[0_0_12px_rgba(16,185,129,0.4)]"
-                : "border-black/5 dark:border-white/[0.02] bg-slate-100 dark:bg-[#1e1c26] text-slate-500 dark:text-[#8e8c95] hover:bg-slate-200 dark:hover:bg-white/10 hover:text-slate-800 dark:hover:text-white"
+              disabled={!canListen}
+              className={`flex h-10 items-center gap-2 rounded-full border px-2.5 transition-all disabled:cursor-not-allowed disabled:opacity-60 ${isListening
+                ? "border-emerald-500/50 bg-emerald-100 text-emerald-700 shadow-[0_0_18px_rgba(16,185,129,0.18)] dark:bg-emerald-500/20 dark:text-emerald-300"
+                : "border-black/5 bg-slate-100 text-slate-600 hover:bg-slate-200 hover:text-slate-900 dark:border-white/[0.02] dark:bg-[#1e1c26] dark:text-[#a4a2ad] dark:hover:bg-white/10 dark:hover:text-white"
                 }`}
             >
-              <Mic size={16} />
+              <span className={`flex size-6 items-center justify-center rounded-full ${isListening ? "bg-emerald-500/15" : "bg-white/70 dark:bg-white/[0.06]"}`}>
+                <Mic size={15} />
+              </span>
+              <span className="hidden min-w-0 flex-col items-start leading-none sm:flex">
+                <span className="text-[11px] font-semibold">
+                  {isListening ? t("voice.listening", locale) : t("voice.dictate", locale)}
+                </span>
+                <span className="mt-1 text-[10px] font-normal text-slate-500 dark:text-[#7d7b86]">
+                  {canListen
+                    ? (isListening ? t("voice.tap_to_stop", locale) : t("voice.tap_to_speak", locale))
+                    : t("voice.not_supported", locale)}
+                </span>
+              </span>
             </button>
             <button
               onClick={handleSend}
               disabled={!input.trim() || isLoading}
-              className="flex size-9 items-center justify-center rounded-full bg-emerald-600 text-white shadow-[0_0_20px_rgba(16,185,129,0.3)] transition-all hover:bg-emerald-500 disabled:opacity-50 disabled:shadow-none active:scale-95"
+              className="flex size-10 items-center justify-center rounded-full bg-emerald-600 text-white shadow-[0_0_20px_rgba(16,185,129,0.25)] transition-all hover:bg-emerald-500 disabled:opacity-50 disabled:shadow-none active:scale-95"
             >
               {isLoading ? (
                 <Loader2 className="size-4 animate-spin" />
@@ -648,7 +666,7 @@ export function Chat({ documents }: ChatProps) {
             </button>
           </div>
 
-          <div className="relative flex gap-3 pr-24">
+          <div className="relative flex gap-3 pr-28 sm:pr-44">
             <Sparkles size={20} className="mt-1 shrink-0 text-emerald-500" strokeWidth={2} />
             <textarea
               ref={inputRef}
@@ -661,6 +679,24 @@ export function Chat({ documents }: ChatProps) {
               rows={1}
             />
           </div>
+
+          <AnimatePresence initial={false}>
+            {isListening && (
+              <motion.div
+                initial={{ opacity: 0, y: 8 }}
+                animate={{ opacity: 1, y: 0 }}
+                exit={{ opacity: 0, y: 8 }}
+                className="mt-3 flex items-center gap-2 rounded-2xl border border-emerald-500/15 bg-emerald-500/8 px-3 py-2 text-[11px] text-emerald-700 dark:border-emerald-400/20 dark:bg-emerald-400/10 dark:text-emerald-300"
+              >
+                <span className="flex items-center gap-1">
+                  <span className="size-2 rounded-full bg-current opacity-75 animate-pulse" />
+                  <span className="size-2 rounded-full bg-current opacity-55 animate-pulse [animation-delay:120ms]" />
+                  <span className="size-2 rounded-full bg-current opacity-35 animate-pulse [animation-delay:240ms]" />
+                </span>
+                <span>{t("voice.live_hint", locale)}</span>
+              </motion.div>
+            )}
+          </AnimatePresence>
         </div>
       </div>
     </div>

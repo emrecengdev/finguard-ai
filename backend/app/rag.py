@@ -12,12 +12,15 @@ import uuid
 import math
 import time
 import logging
+import hashlib
+import platform
 from typing import Any, Optional
 from pathlib import Path
 from collections import Counter
 
 import chromadb
 from chromadb.utils import embedding_functions
+import httpx
 from huggingface_hub import snapshot_download
 from sentence_transformers import (
     CrossEncoder,
@@ -66,7 +69,16 @@ def _validate_quantization(raw_quant: str) -> str:
         logger.warning(
             f"Unknown quantization config '{raw_quant}'. Falling back to 'avx2'."
         )
-        return "avx2"
+        quant = "avx2"
+
+    host_arch = platform.machine().lower()
+    if host_arch in {"arm64", "aarch64"} and quant != "arm64":
+        logger.warning(
+            "Quantization config '%s' is not optimal for host '%s'. Falling back to 'arm64'.",
+            raw_quant,
+            host_arch,
+        )
+        return "arm64"
     return quant
 
 
@@ -128,12 +140,147 @@ def _find_fp32_onnx_file(model_dir: Path) -> Optional[str]:
     return None
 
 
+class GeminiEmbeddingClient:
+    """Minimal Gemini embeddings client for document/query retrieval tasks."""
+
+    def __init__(
+        self,
+        api_key: str,
+        model: str,
+        output_dimensionality: int,
+        batch_size: int,
+        timeout_seconds: float,
+    ) -> None:
+        self.api_key = api_key
+        self.model = model
+        self.output_dimensionality = max(1, output_dimensionality)
+        self.batch_size = max(1, batch_size)
+        self.timeout_seconds = max(1.0, timeout_seconds)
+        self.base_url = "https://generativelanguage.googleapis.com/v1beta"
+
+    def embed_documents(self, texts: list[str], title: str = "") -> list[list[float]]:
+        return self._embed_batch(texts, task_type="RETRIEVAL_DOCUMENT", title=title)
+
+    def embed_queries(self, texts: list[str]) -> list[list[float]]:
+        return self._embed_batch(texts, task_type="RETRIEVAL_QUERY")
+
+    def _embed_batch(
+        self,
+        texts: list[str],
+        task_type: str,
+        title: str = "",
+    ) -> list[list[float]]:
+        if not texts:
+            return []
+
+        embeddings: list[list[float]] = []
+        headers = {"x-goog-api-key": self.api_key}
+
+        with httpx.Client(timeout=self.timeout_seconds, headers=headers) as client:
+            for start in range(0, len(texts), self.batch_size):
+                batch = texts[start:start + self.batch_size]
+                requests = []
+
+                for text in batch:
+                    cleaned_text = text.strip() or " "
+                    request_payload: dict[str, Any] = {
+                        "model": f"models/{self.model}",
+                        "content": {"parts": [{"text": cleaned_text}]},
+                        "taskType": task_type,
+                        "outputDimensionality": self.output_dimensionality,
+                    }
+                    if task_type == "RETRIEVAL_DOCUMENT" and title:
+                        request_payload["title"] = title
+                    requests.append(request_payload)
+
+                response = client.post(
+                    f"{self.base_url}/models/{self.model}:batchEmbedContents",
+                    json={"requests": requests},
+                )
+                response.raise_for_status()
+                payload = response.json()
+                batch_embeddings = payload.get("embeddings", [])
+
+                if len(batch_embeddings) != len(batch):
+                    raise ValueError(
+                        f"Gemini embedding response size mismatch: expected {len(batch)}, got {len(batch_embeddings)}"
+                    )
+
+                for embedding in batch_embeddings:
+                    values = embedding.get("values") or embedding.get("embedding", {}).get("values")
+                    if not values:
+                        raise ValueError("Gemini embedding response missing vector values")
+                    embeddings.append(values)
+
+        return embeddings
+
+
+def _embedding_signature() -> str:
+    settings = get_settings()
+    provider = settings.embedding_provider.lower().strip()
+    if provider == "gemini":
+        signature_source = (
+            f"provider=gemini|model={settings.gemini_embedding_model}|"
+            f"dim={settings.gemini_embedding_dimension}"
+        )
+    else:
+        backend = _validate_backend(
+            raw_backend=settings.embedding_backend,
+            valid_backends=_VALID_EMBEDDING_BACKENDS,
+            fallback="torch",
+            label="embedding",
+        )
+        quantization = _validate_quantization(settings.embedding_quantization)
+        signature_source = (
+            f"provider=local|model={settings.embedding_model}|backend={backend}|"
+            f"quantization={quantization}|normalize={settings.embedding_normalize}"
+        )
+
+    return hashlib.sha1(signature_source.encode("utf-8")).hexdigest()[:12]
+
+
+def _collection_name() -> str:
+    return f"finguard_documents_{_embedding_signature()}"
+
+
 def _get_embedding_fn() -> Any:
     global _embedding_fn, _embedding_runtime
     if _embedding_fn is not None:
         return _embedding_fn
 
     settings = get_settings()
+    provider = settings.embedding_provider.lower().strip()
+
+    if provider == "gemini":
+        if not settings.gemini_api_key:
+            raise ValueError("GEMINI_API_KEY is not configured")
+
+        logger.info(
+            "Loading Gemini embedding runtime: model=%s dim=%s batch_size=%s",
+            settings.gemini_embedding_model,
+            settings.gemini_embedding_dimension,
+            settings.gemini_embedding_batch_size,
+        )
+        _embedding_fn = GeminiEmbeddingClient(
+            api_key=settings.gemini_api_key,
+            model=settings.gemini_embedding_model,
+            output_dimensionality=settings.gemini_embedding_dimension,
+            batch_size=settings.gemini_embedding_batch_size,
+            timeout_seconds=settings.gemini_embedding_timeout_seconds,
+        )
+        _embedding_runtime = {
+            "provider": "gemini",
+            "model": settings.gemini_embedding_model,
+            "requested_backend": "remote",
+            "active_backend": "remote",
+            "quantization": "",
+            "onnx_file": "",
+            "cache_dir": "",
+            "dimension": settings.gemini_embedding_dimension,
+            "collection_name": _collection_name(),
+        }
+        return _embedding_fn
+
     backend = _validate_backend(
         raw_backend=settings.embedding_backend,
         valid_backends=_VALID_EMBEDDING_BACKENDS,
@@ -233,12 +380,15 @@ def _get_embedding_fn() -> Any:
                 _embedding_fn = embedding_functions.SentenceTransformerEmbeddingFunction(**embedding_kwargs)
 
     _embedding_runtime = {
+        "provider": "local",
         "model": model_name,
         "requested_backend": backend,
         "active_backend": selected_backend,
         "quantization": quant_config if "int8" in backend else "",
         "onnx_file": selected_onnx_file,
         "cache_dir": str(model_dir),
+        "dimension": "",
+        "collection_name": _collection_name(),
     }
     logger.info(
         "Embedding runtime: requested=%s active=%s onnx=%s",
@@ -256,12 +406,33 @@ def _get_collection() -> chromadb.Collection:
         os.makedirs(settings.chroma_persist_dir, exist_ok=True)
         logger.info(f"Initializing ChromaDB at: {settings.chroma_persist_dir}")
         _chroma_client = chromadb.PersistentClient(path=settings.chroma_persist_dir)
+        collection_name = _collection_name()
+        logger.info("Using Chroma collection: %s", collection_name)
         _collection = _chroma_client.get_or_create_collection(
-            name="finguard_documents",
-            embedding_function=_get_embedding_fn(),
+            name=collection_name,
             metadata={"hnsw:space": "cosine"},
         )
     return _collection
+
+
+def _embed_document_texts(texts: list[str], title: str = "") -> list[list[float]]:
+    embedding_fn = _get_embedding_fn()
+    settings = get_settings()
+
+    if settings.embedding_provider.lower().strip() == "gemini":
+        return embedding_fn.embed_documents(texts, title=title)
+
+    return embedding_fn(texts)
+
+
+def _embed_query_texts(texts: list[str]) -> list[list[float]]:
+    embedding_fn = _get_embedding_fn()
+    settings = get_settings()
+
+    if settings.embedding_provider.lower().strip() == "gemini":
+        return embedding_fn.embed_queries(texts)
+
+    return embedding_fn(texts)
 
 
 def _get_reranker() -> CrossEncoder:
@@ -717,9 +888,12 @@ def ingest_pdf(
     # Batch upsert
     batch_size = 100
     for i in range(0, len(all_chunks), batch_size):
+        batch_chunks = all_chunks[i:i + batch_size]
+        batch_embeddings = _embed_document_texts(batch_chunks, title=filename)
         collection.upsert(
             ids=all_ids[i:i + batch_size],
-            documents=all_chunks[i:i + batch_size],
+            documents=batch_chunks,
+            embeddings=batch_embeddings,
             metadatas=all_metadatas[i:i + batch_size],
         )
 
@@ -764,10 +938,15 @@ def retrieve(
     top_n = top_n or settings.rag_rerank_top_n
 
     collection = _get_collection()
+    collection_count = collection.count()
+    if collection_count == 0 and not _bm25_corpus:
+        return []
+
+    query_embeddings = _embed_query_texts([query]) if collection_count > 0 else []
     # ── Step 1: Vector search ──
     query_kwargs: dict = {
-        "query_texts": [query],
-        "n_results": min(top_k, collection.count()) if collection.count() > 0 else top_k,
+        "query_embeddings": query_embeddings,
+        "n_results": min(top_k, collection_count) if collection_count > 0 else top_k,
         "include": ["documents", "metadatas", "distances"],
     }
     if source_filter:
@@ -928,6 +1107,7 @@ def get_runtime_optimization_status() -> dict:
         "embedding": dict(_embedding_runtime),
         "reranker": dict(_reranker_runtime),
         "collection_count": collection_count,
+        "collection_name": _collection.name if _collection is not None else _collection_name(),
         "bm25_documents": len(_bm25_corpus),
     }
 
@@ -941,15 +1121,22 @@ def warmup_runtime() -> dict:
     collection = _get_collection()
     collection_count = collection.count()
 
-    embedding_fn = _get_embedding_fn()
+    _get_embedding_fn()
     reranker = _get_reranker()
 
-    # Warm ONNX sessions and tokenizer paths.
-    _ = embedding_fn(
+    # Warm embedding/query paths.
+    _ = _embed_query_texts(
         [
             "query: kıdem tazminatı hesaplama koşulları",
             "query: annual leave entitlement policy",
         ]
+    )
+    _ = _embed_document_texts(
+        [
+            "İş sözleşmesinin mevzuata uygun feshi halinde kıdem tazminatı doğabilir.",
+            "Employees may accrue annual leave based on years of service.",
+        ],
+        title="warmup",
     )
     _ = reranker.predict(
         [

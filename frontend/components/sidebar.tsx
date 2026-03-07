@@ -20,7 +20,7 @@ import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip
 import { uploadPdf, deleteDocument, type DocumentInfo } from "@/lib/api";
 import { extractPdfTextWithScribe } from "@/lib/ocr";
 import { t } from "@/lib/i18n";
-import { SAMPLE_DOCS } from "@/lib/sample-documents";
+import { SAMPLE_DOCS, sampleToViewerDocument, type ViewerDocument } from "@/lib/sample-documents";
 import { useAppStore } from "@/store/useAppStore";
 import { ShinyButton } from "@/components/ui/shiny-button";
 import { ShineBorder } from "@/components/ui/shine-border";
@@ -30,7 +30,7 @@ interface SidebarProps {
   onDocumentsChange: () => void;
   isBackendOnline: boolean;
   selectedDocumentFilename: string | null;
-  onSelectDocument: (document: DocumentInfo) => void;
+  onSelectDocument: (document: ViewerDocument) => void;
 }
 
 const spring = { type: "spring" as const, stiffness: 320, damping: 28 };
@@ -352,8 +352,6 @@ export function Sidebar({
         {/* ── Sample Document Pool ─────────────────────── */}
         {(() => {
           const loadedNames = new Set(documents.map((d) => d.filename));
-          const available = SAMPLE_DOCS.filter((s) => !loadedNames.has(s.file));
-          if (available.length === 0) return null;
 
           return (
             <div ref={samplePoolRef} className="shrink-0">
@@ -378,13 +376,27 @@ export function Sidebar({
                   className="overflow-hidden"
                 >
                   <div className="space-y-1 pb-2">
-                    {available.map((sample) => (
+                    {SAMPLE_DOCS.map((sample) => {
+                      const isLoaded = loadedNames.has(sample.file);
+                      const isSelected = selectedDocumentFilename === sample.file;
+
+                      return (
                       <div
                         key={sample.id}
-                        className="flex items-center justify-between gap-2 rounded-[10px] px-3 py-2 text-[12px] bg-transparent hover:bg-white/60 dark:hover:bg-[#1e293b] transition-colors"
+                        className={`flex items-center justify-between gap-2 rounded-[12px] px-2 py-2 text-[12px] transition-colors ${
+                          isSelected
+                            ? "bg-sky-500/10 ring-1 ring-sky-300/35 dark:bg-sky-400/10 dark:ring-sky-400/20"
+                            : "bg-transparent hover:bg-white/60 dark:hover:bg-[#1e293b]"
+                        }`}
                       >
-                        <div className="flex min-w-0 flex-col">
-                          <span className="font-medium text-slate-700 dark:text-[#d1d0d5] truncate">{sample.name}</span>
+                        <button
+                          type="button"
+                          onClick={() => onSelectDocument(sampleToViewerDocument(sample))}
+                          className="flex min-w-0 flex-1 flex-col rounded-[10px] px-1 py-1 text-left outline-none transition-transform hover:translate-x-[1px]"
+                        >
+                          <span className="truncate font-medium text-slate-700 dark:text-[#d1d0d5]">
+                            {sample.name}
+                          </span>
                           <div className="mt-1 flex min-w-0 flex-wrap items-center gap-1.5 text-[10px] text-slate-400 dark:text-[#6b6975]">
                             <span className="truncate">{sample.desc}</span>
                             <span className="size-1 rounded-full bg-slate-300 dark:bg-slate-700" />
@@ -394,20 +406,33 @@ export function Sidebar({
                                 Ozet
                               </span>
                             ) : null}
+                            {isLoaded ? (
+                              <span className="rounded-full bg-emerald-500/10 px-1.5 py-0.5 text-[9px] font-semibold uppercase tracking-[0.14em] text-emerald-600 dark:bg-emerald-400/10 dark:text-emerald-300">
+                                {t("pool.loaded", locale)}
+                              </span>
+                            ) : null}
                           </div>
-                        </div>
+                        </button>
                         <Button
                           variant="ghost"
                           size="sm"
-                          disabled={addingFromPool === sample.id || !isBackendOnline}
+                          disabled={addingFromPool === sample.id || !isBackendOnline || isLoaded}
                           onClick={async () => {
                             setAddingFromPool(sample.id);
                             try {
                               const res = await fetch(`/samples/${sample.file}`);
+                              if (!res.ok) {
+                                throw new Error(`Sample file unavailable (${res.status})`);
+                              }
                               const blob = await res.blob();
                               const file = new File([blob], sample.file, { type: "application/pdf" });
-                              await uploadPdf(file);
+                              const result = await uploadPdf(file);
                               onDocumentsChange();
+                              onSelectDocument({
+                                filename: result.filename,
+                                pages: result.pages,
+                                chunks: result.chunks,
+                              });
                             } catch (err) {
                               setUploadError(
                                 err instanceof Error ? err.message : t("upload.failed", locale)
@@ -416,16 +441,18 @@ export function Sidebar({
                               setAddingFromPool(null);
                             }
                           }}
-                          className="shrink-0 h-7 px-3 text-[11px] font-medium rounded-lg text-emerald-600 dark:text-primary hover:bg-emerald-500/10 dark:hover:bg-primary/10"
+                          className="shrink-0 h-8 rounded-lg px-3 text-[11px] font-medium text-emerald-600 hover:bg-emerald-500/10 disabled:text-slate-400 disabled:hover:bg-transparent dark:text-primary dark:hover:bg-primary/10 dark:disabled:text-[#6b6975]"
                         >
                           {addingFromPool === sample.id ? (
                             <Loader2 className="size-3 animate-spin" />
+                          ) : isLoaded ? (
+                            t("pool.loaded", locale)
                           ) : (
                             t("pool.add", locale)
                           )}
                         </Button>
                       </div>
-                    ))}
+                    )})}
                   </div>
                 </motion.div>
               )}

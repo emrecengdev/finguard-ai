@@ -3,6 +3,8 @@
  * Handles communication with the FastAPI backend via Next.js JWT Handshake.
  */
 
+import type { Locale } from "@/lib/i18n";
+
 // ─── Types ──────────────────────────────────────────────────────────
 
 export interface AgentStep {
@@ -49,6 +51,12 @@ export interface UploadPdfOptions {
     ocrEngine?: string;
 }
 
+interface ChatRequestPayload {
+    message: string;
+    session_id: string;
+    locale: Locale;
+}
+
 interface StreamHandlers {
     onError: (error: string) => void;
     onResponse: (data: { response: string; guardrail_passed: boolean; sources: ChatSource[] }) => void;
@@ -86,13 +94,18 @@ function handleStreamPayload(
 
 // ─── API Functions ──────────────────────────────────────────────────
 
-export async function sendMessage(message: string, sessionId: string = "default"): Promise<ChatResponse> {
+export async function sendMessage(
+    message: string,
+    sessionId: string = "default",
+    locale: Locale = "tr",
+): Promise<ChatResponse> {
+    const payload: ChatRequestPayload = { message, session_id: sessionId, locale };
     const res = await fetch("/api/chat", {
         method: "POST",
         headers: {
             "Content-Type": "application/json",
         },
-        body: JSON.stringify({ message, session_id: sessionId }),
+        body: JSON.stringify(payload),
     });
 
     if (!res.ok) {
@@ -106,16 +119,18 @@ export async function sendMessage(message: string, sessionId: string = "default"
 export async function streamMessage(
     message: string,
     sessionId: string = "default",
+    locale: Locale = "tr",
     onStep: (step: AgentStep) => void,
     onResponse: (data: { response: string; guardrail_passed: boolean; sources: ChatSource[] }) => void,
     onError: (error: string) => void,
 ): Promise<void> {
+    const payload: ChatRequestPayload = { message, session_id: sessionId, locale };
     const res = await fetch("/api/chat/stream", {
         method: "POST",
         headers: {
             "Content-Type": "application/json",
         },
-        body: JSON.stringify({ message, session_id: sessionId }),
+        body: JSON.stringify(payload),
     });
 
     if (!res.ok) {

@@ -26,12 +26,18 @@ class Settings(BaseSettings):
     api_jwt_audience: str = Field(..., min_length=1)
 
     # ─── Embedding ───────────────────────────────────
+    embedding_provider: str = "local"  # "local" | "gemini"
     embedding_model: str = "intfloat/multilingual-e5-small"
     embedding_backend: str = "onnx-int8"  # "torch" | "onnx" | "onnx-int8"
     embedding_quantization: str = "avx2"  # "arm64" | "avx2" | "avx512" | "avx512_vnni"
     embedding_cache_dir: str = "/app/data/embeddings"
     embedding_trust_remote_code: bool = False
     embedding_normalize: bool = True
+    gemini_api_key: str = ""
+    gemini_embedding_model: str = "gemini-embedding-001"
+    gemini_embedding_dimension: int = 768
+    gemini_embedding_batch_size: int = 16
+    gemini_embedding_timeout_seconds: float = 60.0
 
     # ─── Reranker ────────────────────────────────────
     reranker_model: str = "cross-encoder/mmarco-mMiniLMv2-L12-H384-v1"

@@ -19,11 +19,20 @@ from app.tools import execute_tool, get_tools_description, TOOL_REGISTRY
 logger = logging.getLogger(__name__)
 
 
+def _locale_name(locale: str) -> str:
+    return "Turkish" if locale == "tr" else "English"
+
+
+def _localized_message(locale: str, message_tr: str, message_en: str) -> str:
+    return message_tr if locale == "tr" else message_en
+
+
 # ─── State Schema ────────────────────────────────────────────────────
 
 class AgentState(TypedDict):
     """Shared state flowing through the LangGraph pipeline."""
     user_message: str
+    response_locale: Literal["tr", "en"]
     route: str                       # "rag" | "tool" | "both"
     source_hint: str                 # filename filter for RAG (from Router)
     rag_context: list[dict]          # Retrieved + reranked documents
@@ -256,18 +265,21 @@ Your job is to combine information from RAG context and/or tool execution result
 
 Rules:
 1. Write in a clear, professional tone suitable for banking and HR compliance contexts.
-2. If RAG context is provided, ALWAYS include Markdown citations: `[Source: filename, Page N]`
-3. If tool results are provided, present them in a well-formatted manner.
-4. If both are provided, weave them together cohesively.
-5. Use Markdown formatting (headers, bullet points, bold) for readability.
-6. Do NOT use raw HTML tags such as `<br>`, `<table>`, `<div>`. Output valid pure Markdown only.
-7. Prefer bullet points and numbered lists over Markdown tables.
-8. Keep citations compact: avoid appending citations at the end of every sentence.
-9. Add a final `## Sources` section and list each citation as a bullet, for example:
+2. Always answer entirely in the language specified by `Requested response language`.
+3. If `Requested response language` is Turkish, keep the entire answer in Turkish, including headings and summaries.
+4. If `Requested response language` is English, keep the entire answer in English, including headings and summaries.
+5. If RAG context is provided, ALWAYS include Markdown citations: `[Source: filename, Page N]`
+6. If tool results are provided, present them in a well-formatted manner.
+7. If both are provided, weave them together cohesively.
+8. Use Markdown formatting (headers, bullet points, bold) for readability.
+9. Do NOT use raw HTML tags such as `<br>`, `<table>`, `<div>`. Output valid pure Markdown only.
+10. Prefer bullet points and numbered lists over Markdown tables.
+11. Keep citations compact: avoid appending citations at the end of every sentence.
+12. Add a final `## Sources` section and list each citation as a bullet, for example:
    `- [Source: HR_Policy.pdf, Page 4]`
-10. If no context or results are available, politely state that you don't have enough information.
-11. Never fabricate information — only use what's provided.
-12. If a tool result contains `simulated: true`, clearly label it as a simulation/demo estimate."""
+13. If no context or results are available, politely state that you don't have enough information.
+14. Never fabricate information — only use what's provided.
+15. If a tool result contains `simulated: true`, clearly label it as a simulation/demo estimate."""
 
 
 def synthesizer_node(state: AgentState) -> AgentState:
@@ -275,6 +287,7 @@ def synthesizer_node(state: AgentState) -> AgentState:
     step = {"node": "synthesizer", "status": "composing", "detail": "Drafting response..."}
     steps = list(state.get("agent_steps", []))
     steps.append(step)
+    response_locale = state.get("response_locale", "tr")
 
     # Build context block
     context_parts = []
@@ -295,20 +308,36 @@ def synthesizer_node(state: AgentState) -> AgentState:
     if not context_parts:
         retrieval_error = state.get("error", "")
         if retrieval_error:
-            fallback = (
-                "Belgeleriniz yüklü olabilir ancak bilgi tabanı sorgusu sırasında teknik bir hata oluştu. "
-                "Lütfen kısa süre sonra tekrar deneyin. Sorun devam ederse belgeyi yeniden yükleyin."
+            fallback = _localized_message(
+                response_locale,
+                (
+                    "Belgeleriniz yüklü olabilir ancak bilgi tabanı sorgusu sırasında teknik bir hata oluştu. "
+                    "Lütfen kısa süre sonra tekrar deneyin. Sorun devam ederse belgeyi yeniden yükleyin."
+                ),
+                (
+                    "Your documents may already be uploaded, but a technical error occurred while querying "
+                    "the knowledge base. Please try again shortly. If the issue continues, re-upload the document."
+                ),
             )
             step["status"] = "error"
             step["detail"] = retrieval_error
             steps[-1] = step
             return {**state, "synthesized_response": fallback, "agent_steps": steps}
 
-        fallback = (
-            "Sistemde yüklü herhangi bir belge (PDF) bulunmamaktadır veya sorunuzla eşleşen "
-            "bir içerik tespit edilememiştir. FinGuard AI, hukuki tavsiye ve finansal analiz "
-            "yaparken sadece yüklenen belgeleri baz alır (Sıfır-Halüsinasyon Politikası).\n\n"
-            "Lütfen sol panelden ilgili PDF belgesini yükleyip sorunuzu tekrar yöneltin."
+        fallback = _localized_message(
+            response_locale,
+            (
+                "Sistemde yüklü herhangi bir belge (PDF) bulunmamaktadır veya sorunuzla eşleşen "
+                "bir içerik tespit edilememiştir. FinGuard AI, hukuki tavsiye ve finansal analiz "
+                "yaparken sadece yüklenen belgeleri baz alır (Sıfır-Halüsinasyon Politikası).\n\n"
+                "Lütfen sol panelden ilgili PDF belgesini yükleyip sorunuzu tekrar yöneltin."
+            ),
+            (
+                "There are no uploaded PDF documents in the system, or no relevant content was found for "
+                "your question. FinGuard AI only relies on uploaded documents when producing legal and "
+                "financial compliance answers (Zero Hallucination Policy).\n\n"
+                "Please upload the relevant PDF from the left panel and ask your question again."
+            ),
         )
         step["status"] = "skipped"
         step["detail"] = "Zero documents loaded. LLM execution skipped to prevent hallucination."
@@ -317,6 +346,7 @@ def synthesizer_node(state: AgentState) -> AgentState:
 
     combined_context = "\n\n".join(context_parts)
     user_prompt = (
+        f"Requested response language: {_locale_name(response_locale)}\n"
         f"User's original question: {state['user_message']}\n\n"
         f"Available information:\n{combined_context}\n\n"
         "Compose a comprehensive, well-cited response."
@@ -331,9 +361,16 @@ def synthesizer_node(state: AgentState) -> AgentState:
 
     except Exception as e:
         logger.error(f"Synthesizer error: {e}")
-        fallback = (
-            "I apologize, but I encountered an error while composing the response. "
-            "Please try again or rephrase your question."
+        fallback = _localized_message(
+            response_locale,
+            (
+                "Yanıt oluşturulurken bir hata oluştu. "
+                "Lütfen tekrar deneyin veya soruyu farklı şekilde ifade edin."
+            ),
+            (
+                "I encountered an error while composing the response. "
+                "Please try again or rephrase your question."
+            ),
         )
         step["status"] = "error"
         step["detail"] = f"Synthesis failed: {str(e)}"
@@ -370,13 +407,18 @@ def guardrail_node(state: AgentState) -> AgentState:
     steps.append(step)
 
     synthesized = state.get("synthesized_response", "")
+    response_locale = state.get("response_locale", "tr")
     if not synthesized:
         step["status"] = "error"
         step["detail"] = "No response to evaluate."
         steps[-1] = step
         return {
             **state,
-            "final_response": "An internal error occurred. Please try again.",
+            "final_response": _localized_message(
+                response_locale,
+                "İç sistem hatası oluştu. Lütfen tekrar deneyin.",
+                "An internal error occurred. Please try again.",
+            ),
             "guardrail_passed": False,
             "agent_steps": steps,
         }
@@ -422,9 +464,16 @@ def guardrail_node(state: AgentState) -> AgentState:
         steps[-1] = step
         return {
             **state,
-            "final_response": (
-                "I couldn't complete the compliance verification for this response. "
-                "Please try again in a moment."
+            "final_response": _localized_message(
+                response_locale,
+                (
+                    "Bu yanıt için uyum doğrulamasını tamamlayamadım. "
+                    "Lütfen kısa süre sonra tekrar deneyin."
+                ),
+                (
+                    "I couldn't complete the compliance verification for this response. "
+                    "Please try again in a moment."
+                ),
             ),
             "guardrail_passed": False,
             "agent_steps": steps,
@@ -510,12 +559,13 @@ def get_graph():
     return _compiled_graph
 
 
-async def run_graph(user_message: str) -> AgentState:
+async def run_graph(user_message: str, response_locale: Literal["tr", "en"] = "tr") -> AgentState:
     """Execute the full agent pipeline for a user message."""
     graph = get_graph()
 
     initial_state: AgentState = {
         "user_message": user_message,
+        "response_locale": response_locale,
         "route": "",
         "source_hint": "",
         "rag_context": [],
