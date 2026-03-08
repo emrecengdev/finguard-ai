@@ -42,6 +42,7 @@ class Settings(BaseSettings):
     gemini_embedding_dimension: int = 768
     gemini_embedding_batch_size: int = 32
     gemini_embedding_timeout_seconds: float = 60.0
+    pdf_text_extractor: str = "auto"  # "auto" | "pypdf" | "pymupdf"
 
     # ─── Reranker ────────────────────────────────────
     reranker_model: str = "cross-encoder/mmarco-mMiniLMv2-L12-H384-v1"

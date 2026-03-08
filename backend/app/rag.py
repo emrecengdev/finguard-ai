@@ -27,9 +27,9 @@ from sentence_transformers import (
     SentenceTransformer,
     export_dynamic_quantized_onnx_model,
 )
-from pypdf import PdfReader
 
 from app.config import get_settings
+from app.pdf_extraction import extract_pdf_text
 
 logger = logging.getLogger(__name__)
 
@@ -837,22 +837,6 @@ def _chunk_text_smart(text: str, max_chunk_size: int = 1200) -> list[dict]:
     return chunks
 
 
-# ─── PDF Extraction ──────────────────────────────────────────────────
-
-def extract_pdf_text(file_path: str) -> list[dict]:
-    """
-    Extract text from PDF, returning per-page data.
-    Returns: [{"page": 1, "text": "..."}, ...]
-    """
-    reader = PdfReader(file_path)
-    pages = []
-    for i, page in enumerate(reader.pages):
-        text = page.extract_text()
-        if text and text.strip():
-            pages.append({"page": i + 1, "text": text.strip()})
-    return pages
-
-
 def _normalize_extracted_pages(pages: list[dict] | None) -> list[dict]:
     """
     Normalize externally provided per-page OCR text payloads.
@@ -922,9 +906,12 @@ def ingest_pdf(
         extraction_mode = extraction_mode or "ocr"
     else:
         extract_started = time.perf_counter()
-        pages = extract_pdf_text(file_path)
+        pages, native_extractor = extract_pdf_text(
+            file_path,
+            default_extractor=settings.pdf_text_extractor,
+        )
         extract_seconds = time.perf_counter() - extract_started
-        extraction_mode = "native"
+        extraction_mode = f"native:{native_extractor}"
         ocr_engine = ""
 
     if not pages:
