@@ -113,6 +113,9 @@ class UploadResponse(BaseModel):
     extraction_mode: str = "native"
     ocr_engine: str = ""
     status: str
+    bm25_mode: str | None = None
+    embedding_requests: int | None = None
+    timings_ms: dict[str, float] | None = None
 
 
 class DocumentInfo(BaseModel):
@@ -131,31 +134,52 @@ class DeleteResponse(BaseModel):
 
 security = HTTPBearer(auto_error=False)
 
-async def verify_jwt_token(
+def _decode_backend_token(
     credentials: HTTPAuthorizationCredentials | None = Security(security),
-):
-    """
-    Verifies the short-lived server-to-server JWT minted by the Next.js proxy.
-    """
+) -> dict:
     if not credentials or not credentials.credentials:
         raise HTTPException(status_code=401, detail="Missing authentication token")
 
     settings = get_settings()
     try:
-        payload = jwt.decode(
+        return jwt.decode(
             credentials.credentials,
             settings.api_jwt_secret,
             algorithms=["HS256"],
             audience=settings.api_jwt_audience,
             issuer=settings.api_jwt_issuer,
         )
-        if payload.get("sub") != "finguard-frontend":
-            raise HTTPException(status_code=403, detail="Invalid token subject")
-        return payload
     except jwt.ExpiredSignatureError:
         raise HTTPException(status_code=401, detail="Token expired")
     except jwt.InvalidTokenError:
         raise HTTPException(status_code=401, detail="Invalid token")
+
+
+async def verify_jwt_token(
+    credentials: HTTPAuthorizationCredentials | None = Security(security),
+):
+    """
+    Verifies the short-lived server-to-server JWT minted by the Next.js proxy.
+    """
+    payload = _decode_backend_token(credentials)
+    if payload.get("sub") != "finguard-frontend":
+        raise HTTPException(status_code=403, detail="Invalid token subject")
+    return payload
+
+
+async def verify_upload_token(
+    credentials: HTTPAuthorizationCredentials | None = Security(security),
+):
+    """
+    Allows either the internal Next.js proxy token or a short-lived upload token.
+    """
+    payload = _decode_backend_token(credentials)
+    subject = payload.get("sub")
+    if subject == "finguard-frontend":
+        return payload
+    if subject == "finguard-upload" and payload.get("scope") == "upload":
+        return payload
+    raise HTTPException(status_code=403, detail="Invalid upload token")
 
 
 def _sanitize_filename(filename: str) -> str:
@@ -211,7 +235,7 @@ async def upload_pdf(
     file: UploadFile = File(...),
     ocr_pages: str | None = Form(default=None),
     ocr_engine: str = Form(default=""),
-    user: dict = Depends(verify_jwt_token),
+    user: dict = Depends(verify_upload_token),
 ):
     """Upload and ingest a PDF document into the knowledge base."""
     if not file.filename or not file.filename.lower().endswith(".pdf"):
@@ -221,6 +245,7 @@ async def upload_pdf(
     file_path = ""
     safe_filename = _sanitize_filename(file.filename)
     file_path = os.path.join(settings.upload_dir, safe_filename)
+    request_started = asyncio.get_running_loop().time()
 
     try:
         file_size = await _persist_upload_file(
@@ -278,6 +303,17 @@ async def upload_pdf(
             extracted_pages,
             extraction_mode,
             normalized_ocr_engine,
+        )
+        request_elapsed_ms = round((asyncio.get_running_loop().time() - request_started) * 1000, 1)
+        timings_ms = dict(result.get("timings_ms") or {})
+        timings_ms["request_total"] = request_elapsed_ms
+        result["timings_ms"] = timings_ms
+        logger.info(
+            "Upload pipeline complete for %s in %.1fms (chunks=%s, bm25=%s)",
+            safe_filename,
+            request_elapsed_ms,
+            result.get("chunks", 0),
+            result.get("bm25_mode", "unknown"),
         )
 
         return UploadResponse(**result)

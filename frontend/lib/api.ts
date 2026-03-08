@@ -39,6 +39,9 @@ export interface UploadResponse {
     extraction_mode: string;
     ocr_engine: string;
     status: string;
+    bm25_mode?: string;
+    embedding_requests?: number;
+    timings_ms?: Record<string, number>;
 }
 
 export interface OcrPagePayload {
@@ -49,6 +52,12 @@ export interface OcrPagePayload {
 export interface UploadPdfOptions {
     ocrPages?: OcrPagePayload[];
     ocrEngine?: string;
+}
+
+interface UploadSessionResponse {
+    uploadUrl: string;
+    token: string;
+    expiresInSeconds: number;
 }
 
 interface ChatRequestPayload {
@@ -201,16 +210,54 @@ export async function streamMessage(
 }
 
 export async function uploadPdf(file: File, options: UploadPdfOptions = {}): Promise<UploadResponse> {
-    const formData = new FormData();
-    formData.append("file", file);
-    if (options.ocrPages && options.ocrPages.length > 0) {
-        formData.append("ocr_pages", JSON.stringify(options.ocrPages));
-        formData.append("ocr_engine", options.ocrEngine || "unknown");
+    const buildFormData = () => {
+        const formData = new FormData();
+        formData.append("file", file);
+        if (options.ocrPages && options.ocrPages.length > 0) {
+            formData.append("ocr_pages", JSON.stringify(options.ocrPages));
+            formData.append("ocr_engine", options.ocrEngine || "unknown");
+        }
+        return formData;
+    };
+
+    const tryDirectUpload = async (): Promise<UploadResponse> => {
+        const sessionRes = await fetch("/api/upload/session", {
+            method: "POST",
+        });
+
+        if (!sessionRes.ok) {
+            throw new TypeError("Direct upload session unavailable");
+        }
+
+        const session = (await sessionRes.json()) as UploadSessionResponse;
+        const directRes = await fetch(session.uploadUrl, {
+            method: "POST",
+            headers: {
+                Authorization: `Bearer ${session.token}`,
+            },
+            body: buildFormData(),
+        });
+
+        if (!directRes.ok) {
+            const err = await directRes.json().catch(() => ({ detail: "Unknown error" }));
+            throw new Error(err.detail || `Upload failed (${directRes.status})`);
+        }
+
+        return directRes.json();
+    };
+
+    try {
+        return await tryDirectUpload();
+    } catch (error) {
+        if (!(error instanceof TypeError)) {
+            throw error;
+        }
+        console.warn("Direct upload failed, falling back to proxy route:", error);
     }
 
     const res = await fetch("/api/upload", {
         method: "POST",
-        body: formData,
+        body: buildFormData(),
     });
 
     if (!res.ok) {

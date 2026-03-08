@@ -20,7 +20,11 @@ class Settings(BaseSettings):
     upload_dir: str = "/app/data/uploads"
 
     # ─── CORS & Security ─────────────────────────────
-    cors_origins: str = "http://localhost:3000,https://finguard.projects.emrecanik.com"
+    cors_origins: str = (
+        "http://localhost:3000,http://localhost:3002,"
+        "http://127.0.0.1:3000,http://127.0.0.1:3002,"
+        "https://finguard.projects.emrecanik.com"
+    )
     api_jwt_secret: str = Field(..., min_length=32)
     api_jwt_issuer: str = Field(..., min_length=1)
     api_jwt_audience: str = Field(..., min_length=1)
@@ -36,7 +40,7 @@ class Settings(BaseSettings):
     gemini_api_key: str = ""
     gemini_embedding_model: str = "gemini-embedding-001"
     gemini_embedding_dimension: int = 768
-    gemini_embedding_batch_size: int = 16
+    gemini_embedding_batch_size: int = 32
     gemini_embedding_timeout_seconds: float = 60.0
 
     # ─── Reranker ────────────────────────────────────

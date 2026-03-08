@@ -41,9 +41,12 @@ _reranker: Optional[CrossEncoder] = None
 _embedding_fn: Optional[Any] = None
 _embedding_runtime: dict[str, Any] = {}
 _reranker_runtime: dict[str, Any] = {}
+_gemini_http_client: Optional[httpx.Client] = None
 
 # BM25 in-memory index (rebuilt on startup / after ingestion)
 _bm25_corpus: list[dict] = []  # [{"id": ..., "text": ..., "source": ..., "page": ...}]
+_bm25_doc_freqs: Counter = Counter()
+_bm25_total_len = 0
 _bm25_idf: dict[str, float] = {}
 _bm25_k1 = 1.5
 _bm25_b = 0.75
@@ -157,6 +160,17 @@ class GeminiEmbeddingClient:
         self.batch_size = max(1, batch_size)
         self.timeout_seconds = max(1.0, timeout_seconds)
         self.base_url = "https://generativelanguage.googleapis.com/v1beta"
+        self._client: Optional[httpx.Client] = None
+
+    def _get_client(self) -> httpx.Client:
+        if self._client is None:
+            self._client = httpx.Client(
+                timeout=self.timeout_seconds,
+                headers={"x-goog-api-key": self.api_key},
+                http2=True,
+                limits=httpx.Limits(max_keepalive_connections=8, max_connections=16),
+            )
+        return self._client
 
     def embed_documents(self, texts: list[str], title: str = "") -> list[list[float]]:
         return self._embed_batch(texts, task_type="RETRIEVAL_DOCUMENT", title=title)
@@ -174,43 +188,42 @@ class GeminiEmbeddingClient:
             return []
 
         embeddings: list[list[float]] = []
-        headers = {"x-goog-api-key": self.api_key}
+        client = self._get_client()
 
-        with httpx.Client(timeout=self.timeout_seconds, headers=headers) as client:
-            for start in range(0, len(texts), self.batch_size):
-                batch = texts[start:start + self.batch_size]
-                requests = []
+        for start in range(0, len(texts), self.batch_size):
+            batch = texts[start:start + self.batch_size]
+            requests = []
 
-                for text in batch:
-                    cleaned_text = text.strip() or " "
-                    request_payload: dict[str, Any] = {
-                        "model": f"models/{self.model}",
-                        "content": {"parts": [{"text": cleaned_text}]},
-                        "taskType": task_type,
-                        "outputDimensionality": self.output_dimensionality,
-                    }
-                    if task_type == "RETRIEVAL_DOCUMENT" and title:
-                        request_payload["title"] = title
-                    requests.append(request_payload)
+            for text in batch:
+                cleaned_text = text.strip() or " "
+                request_payload: dict[str, Any] = {
+                    "model": f"models/{self.model}",
+                    "content": {"parts": [{"text": cleaned_text}]},
+                    "taskType": task_type,
+                    "outputDimensionality": self.output_dimensionality,
+                }
+                if task_type == "RETRIEVAL_DOCUMENT" and title:
+                    request_payload["title"] = title
+                requests.append(request_payload)
 
-                response = client.post(
-                    f"{self.base_url}/models/{self.model}:batchEmbedContents",
-                    json={"requests": requests},
+            response = client.post(
+                f"{self.base_url}/models/{self.model}:batchEmbedContents",
+                json={"requests": requests},
+            )
+            response.raise_for_status()
+            payload = response.json()
+            batch_embeddings = payload.get("embeddings", [])
+
+            if len(batch_embeddings) != len(batch):
+                raise ValueError(
+                    f"Gemini embedding response size mismatch: expected {len(batch)}, got {len(batch_embeddings)}"
                 )
-                response.raise_for_status()
-                payload = response.json()
-                batch_embeddings = payload.get("embeddings", [])
 
-                if len(batch_embeddings) != len(batch):
-                    raise ValueError(
-                        f"Gemini embedding response size mismatch: expected {len(batch)}, got {len(batch_embeddings)}"
-                    )
-
-                for embedding in batch_embeddings:
-                    values = embedding.get("values") or embedding.get("embedding", {}).get("values")
-                    if not values:
-                        raise ValueError("Gemini embedding response missing vector values")
-                    embeddings.append(values)
+            for embedding in batch_embeddings:
+                values = embedding.get("values") or embedding.get("embedding", {}).get("values")
+                if not values:
+                    raise ValueError("Gemini embedding response missing vector values")
+                embeddings.append(values)
 
         return embeddings
 
@@ -588,46 +601,108 @@ def _tokenize(text: str) -> list[str]:
     return [t for t in text.split() if len(t) > 1]
 
 
+def _make_bm25_entry(doc_id: str, doc_text: str, meta: dict) -> dict:
+    tokens = _tokenize(doc_text)
+    return {
+        "id": doc_id,
+        "text": doc_text,
+        "tokens": tokens,
+        "source": meta.get("source", "unknown"),
+        "page": meta.get("page", 0),
+        "article": meta.get("article", ""),
+    }
+
+
+def _recompute_bm25_stats() -> None:
+    global _bm25_idf, _bm25_avgdl
+
+    corpus_size = len(_bm25_corpus)
+    _bm25_avgdl = _bm25_total_len / corpus_size if corpus_size > 0 else 1.0
+    _bm25_idf = {}
+    for term, df in _bm25_doc_freqs.items():
+        if df <= 0:
+            continue
+        _bm25_idf[term] = math.log((corpus_size - df + 0.5) / (df + 0.5) + 1.0)
+
+
+def _append_bm25_entries(entries: list[dict]) -> None:
+    global _bm25_total_len
+
+    if not entries:
+        return
+
+    _bm25_corpus.extend(entries)
+    for entry in entries:
+        unique_tokens = set(entry["tokens"])
+        for token in unique_tokens:
+            _bm25_doc_freqs[token] += 1
+        _bm25_total_len += len(entry["tokens"])
+
+    _recompute_bm25_stats()
+
+
+def _remove_bm25_source(filename: str) -> int:
+    global _bm25_corpus, _bm25_total_len
+
+    removed_entries: list[dict] = []
+    retained_entries: list[dict] = []
+
+    for entry in _bm25_corpus:
+        if entry["source"] == filename:
+            removed_entries.append(entry)
+        else:
+            retained_entries.append(entry)
+
+    if not removed_entries:
+        return 0
+
+    _bm25_corpus = retained_entries
+    for entry in removed_entries:
+        unique_tokens = set(entry["tokens"])
+        for token in unique_tokens:
+            next_value = _bm25_doc_freqs[token] - 1
+            if next_value > 0:
+                _bm25_doc_freqs[token] = next_value
+            else:
+                _bm25_doc_freqs.pop(token, None)
+        _bm25_total_len -= len(entry["tokens"])
+
+    _recompute_bm25_stats()
+    return len(removed_entries)
+
+
 def _build_bm25_index():
     """Rebuild BM25 IDF from ChromaDB collection."""
-    global _bm25_corpus, _bm25_idf, _bm25_avgdl
+    global _bm25_corpus, _bm25_doc_freqs, _bm25_total_len, _bm25_idf, _bm25_avgdl
 
     collection = _get_collection()
     if collection.count() == 0:
         _bm25_corpus = []
+        _bm25_doc_freqs = Counter()
+        _bm25_total_len = 0
         _bm25_idf = {}
         _bm25_avgdl = 0.0
         return
 
     all_data = collection.get(include=["documents", "metadatas"])
     _bm25_corpus = []
-    doc_freqs: Counter = Counter()
-    total_len = 0
+    _bm25_doc_freqs = Counter()
+    _bm25_total_len = 0
 
     for i, (doc_text, meta) in enumerate(zip(all_data["documents"], all_data["metadatas"])):
-        tokens = _tokenize(doc_text)
-        _bm25_corpus.append({
-            "id": all_data["ids"][i],
-            "text": doc_text,
-            "tokens": tokens,
-            "source": meta.get("source", "unknown"),
-            "page": meta.get("page", 0),
-            "article": meta.get("article", ""),
-        })
-        unique_tokens = set(tokens)
-        for t in unique_tokens:
-            doc_freqs[t] += 1
-        total_len += len(tokens)
+        entry = _make_bm25_entry(all_data["ids"][i], doc_text, meta)
+        _bm25_corpus.append(entry)
+        unique_tokens = set(entry["tokens"])
+        for token in unique_tokens:
+            _bm25_doc_freqs[token] += 1
+        _bm25_total_len += len(entry["tokens"])
 
-    n = len(_bm25_corpus)
-    _bm25_avgdl = total_len / n if n > 0 else 1.0
-
-    # IDF: log((N - df + 0.5) / (df + 0.5) + 1)
-    _bm25_idf = {}
-    for term, df in doc_freqs.items():
-        _bm25_idf[term] = math.log((n - df + 0.5) / (df + 0.5) + 1.0)
-
-    logger.info(f"BM25 index built: {n} documents, {len(_bm25_idf)} unique terms")
+    _recompute_bm25_stats()
+    logger.info(
+        "BM25 index built: %s documents, %s unique terms",
+        len(_bm25_corpus),
+        len(_bm25_idf),
+    )
 
 
 def _bm25_search(query: str, top_k: int = 25, source_filter: Optional[str] = None) -> list[dict]:
@@ -828,13 +903,27 @@ def ingest_pdf(
     """
     settings = get_settings()
     collection = _get_collection()
+    ingest_started = time.perf_counter()
+    extract_seconds = 0.0
+    text_assembly_seconds = 0.0
+    chunking_seconds = 0.0
+    prep_seconds = 0.0
+    embedding_seconds = 0.0
+    upsert_seconds = 0.0
+    bm25_seconds = 0.0
+    embedding_requests = 0
+    bm25_mode = "full_rebuild"
 
     normalized_external_pages = _normalize_extracted_pages(extracted_pages)
     if normalized_external_pages:
+        extract_started = time.perf_counter()
         pages = normalized_external_pages
+        extract_seconds = time.perf_counter() - extract_started
         extraction_mode = extraction_mode or "ocr"
     else:
+        extract_started = time.perf_counter()
         pages = extract_pdf_text(file_path)
+        extract_seconds = time.perf_counter() - extract_started
         extraction_mode = "native"
         ocr_engine = ""
 
@@ -842,6 +931,7 @@ def ingest_pdf(
         raise ValueError(f"No extractable text found in {filename}")
 
     # Build full text with page markers for metadata mapping
+    text_assembly_started = time.perf_counter()
     page_boundaries = []  # [(start_char, end_char, page_num)]
     full_text = ""
     for p in pages:
@@ -849,13 +939,17 @@ def ingest_pdf(
         full_text += p["text"] + "\n\n"
         end = len(full_text)
         page_boundaries.append((start, end, p["page"]))
+    text_assembly_seconds = time.perf_counter() - text_assembly_started
 
     # Article-aware chunking on full text
+    chunking_started = time.perf_counter()
     article_chunks = _chunk_by_articles(full_text, max_chunk_size=settings.chunk_size)
+    chunking_seconds = time.perf_counter() - chunking_started
 
     if not article_chunks:
         raise ValueError(f"No chunks generated from {filename}")
 
+    prep_started = time.perf_counter()
     all_chunks: list[str] = []
     all_metadatas: list[dict] = []
     all_ids: list[str] = []
@@ -884,26 +978,66 @@ def ingest_pdf(
             "ocr_engine": ocr_engine,
         })
         all_ids.append(chunk_id)
+    prep_seconds = time.perf_counter() - prep_started
 
     # Batch upsert
     batch_size = 100
     for i in range(0, len(all_chunks), batch_size):
         batch_chunks = all_chunks[i:i + batch_size]
+        embedding_started = time.perf_counter()
         batch_embeddings = _embed_document_texts(batch_chunks, title=filename)
+        embedding_seconds += time.perf_counter() - embedding_started
+        if settings.embedding_provider.lower().strip() == "gemini":
+            embedding_requests += math.ceil(len(batch_chunks) / settings.gemini_embedding_batch_size)
+        else:
+            embedding_requests += 1
+        upsert_started = time.perf_counter()
         collection.upsert(
             ids=all_ids[i:i + batch_size],
             documents=batch_chunks,
             embeddings=batch_embeddings,
             metadatas=all_metadatas[i:i + batch_size],
         )
+        upsert_seconds += time.perf_counter() - upsert_started
 
-    # Rebuild BM25 index
-    _build_bm25_index()
+    # Keep BM25 exact without scanning the full collection on every upload.
+    bm25_started = time.perf_counter()
+    previous_collection_count = max(0, collection.count() - len(all_ids))
+    if len(_bm25_corpus) == previous_collection_count:
+        _append_bm25_entries(
+            [
+                _make_bm25_entry(doc_id, doc_text, meta)
+                for doc_id, doc_text, meta in zip(all_ids, all_chunks, all_metadatas)
+            ]
+        )
+        bm25_mode = "incremental_add"
+    else:
+        _build_bm25_index()
+        bm25_mode = "full_rebuild"
+    bm25_seconds = time.perf_counter() - bm25_started
+
+    total_seconds = time.perf_counter() - ingest_started
 
     logger.info(
-        f"Ingested {len(all_chunks)} chunks from '{filename}' "
-        f"({len(pages)} pages, {sum(1 for c in article_chunks if c.get('article'))} articles, "
-        f"mode={extraction_mode}{f', ocr={ocr_engine}' if ocr_engine else ''})"
+        "Ingested %s chunks from '%s' (%s pages, %s articles, mode=%s%s) | "
+        "extract=%.1fms text=%.1fms chunk=%.1fms prep=%.1fms embed=%.1fms "
+        "upsert=%.1fms bm25=%.1fms total=%.1fms embed_requests=%s bm25_mode=%s",
+        len(all_chunks),
+        filename,
+        len(pages),
+        sum(1 for c in article_chunks if c.get("article")),
+        extraction_mode,
+        f", ocr={ocr_engine}" if ocr_engine else "",
+        extract_seconds * 1000,
+        text_assembly_seconds * 1000,
+        chunking_seconds * 1000,
+        prep_seconds * 1000,
+        embedding_seconds * 1000,
+        upsert_seconds * 1000,
+        bm25_seconds * 1000,
+        total_seconds * 1000,
+        embedding_requests,
+        bm25_mode,
     )
 
     return {
@@ -913,6 +1047,18 @@ def ingest_pdf(
         "articles": sum(1 for c in article_chunks if c.get("article")),
         "extraction_mode": extraction_mode,
         "ocr_engine": ocr_engine,
+        "bm25_mode": bm25_mode,
+        "embedding_requests": embedding_requests,
+        "timings_ms": {
+            "extract": round(extract_seconds * 1000, 1),
+            "text_assembly": round(text_assembly_seconds * 1000, 1),
+            "chunking": round(chunking_seconds * 1000, 1),
+            "prep": round(prep_seconds * 1000, 1),
+            "embedding": round(embedding_seconds * 1000, 1),
+            "upsert": round(upsert_seconds * 1000, 1),
+            "bm25": round(bm25_seconds * 1000, 1),
+            "total": round(total_seconds * 1000, 1),
+        },
         "status": "success",
     }
 
@@ -1079,7 +1225,7 @@ def list_documents() -> list[dict]:
 
 
 def delete_document(filename: str) -> dict:
-    """Delete all chunks belonging to a specific document and rebuild BM25."""
+    """Delete all chunks belonging to a specific document and keep BM25 exact."""
     collection = _get_collection()
 
     all_data = collection.get(include=["metadatas"])
@@ -1091,7 +1237,10 @@ def delete_document(filename: str) -> dict:
 
     if ids_to_delete:
         collection.delete(ids=ids_to_delete)
-        _build_bm25_index()
+        if len(_bm25_corpus) == collection.count() + len(ids_to_delete):
+            _remove_bm25_source(filename)
+        else:
+            _build_bm25_index()
 
     return {
         "filename": filename,

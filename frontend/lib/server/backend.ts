@@ -28,17 +28,49 @@ export function getBackendApiUrl(pathname: string): string {
   return `${getBackendApiBaseUrl()}${pathname}`;
 }
 
-async function createBackendAuthToken(): Promise<string> {
+export function getPublicBackendApiBaseUrl(): string {
+  const configuredBaseUrl =
+    process.env.NEXT_PUBLIC_API_URL ?? process.env.BACKEND_API_URL;
+
+  if (!configuredBaseUrl) {
+    throw new Error(
+      "Missing required server environment variable: NEXT_PUBLIC_API_URL or BACKEND_API_URL"
+    );
+  }
+
+  return configuredBaseUrl.replace(/\/+$/, "");
+}
+
+export function getPublicBackendApiUrl(pathname: string): string {
+  return `${getPublicBackendApiBaseUrl()}${pathname}`;
+}
+
+interface CreateBackendTokenOptions {
+  expiresIn?: string;
+  scope?: string;
+  sub?: string;
+}
+
+export async function createBackendAuthToken(
+  options: CreateBackendTokenOptions = {},
+): Promise<string> {
   const secret = requireServerEnv("API_JWT_SECRET");
   const issuer = requireServerEnv("API_JWT_ISSUER");
   const audience = requireServerEnv("API_JWT_AUDIENCE");
+  const subject = options.sub?.trim() || "finguard-frontend";
+  const expiresIn = options.expiresIn?.trim() || "60s";
 
-  return new SignJWT({ sub: "finguard-frontend" })
+  const payload: Record<string, string> = { sub: subject };
+  if (options.scope?.trim()) {
+    payload.scope = options.scope.trim();
+  }
+
+  return new SignJWT(payload)
     .setProtectedHeader({ alg: "HS256" })
     .setIssuer(issuer)
     .setAudience(audience)
     .setIssuedAt()
-    .setExpirationTime("60s")
+    .setExpirationTime(expiresIn)
     .sign(encoder.encode(secret));
 }
 
