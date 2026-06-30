@@ -168,7 +168,6 @@ class GeminiEmbeddingClient:
             self._client = httpx.Client(
                 timeout=self.timeout_seconds,
                 headers={"x-goog-api-key": self.api_key},
-                http2=True,
                 limits=httpx.Limits(max_keepalive_connections=8, max_connections=16),
             )
         return self._client
