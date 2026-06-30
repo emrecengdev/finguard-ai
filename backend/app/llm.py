@@ -156,6 +156,10 @@ def _call_llm(system_prompt: str, user_prompt: str) -> str:
                 ],
                 temperature=settings.llm_temperature,
                 max_completion_tokens=settings.llm_max_completion_tokens,
+                # MiniMax M2.x always emits <think> reasoning; reasoning_split
+                # moves it to a separate field so .content is clean (JSON for
+                # router/guardrail, answer-only for synthesizer/streaming).
+                extra_body={"reasoning_split": True} if settings.llm_provider == "minimax" else {},
             )
         except Exception as exc:  # noqa: BLE001 — we classify and re-raise
             last_error = exc
@@ -241,6 +245,7 @@ def _call_llm_stream(
                 max_completion_tokens=settings.llm_max_completion_tokens,
                 stream=True,
                 stream_options={"include_usage": True},
+                extra_body={"reasoning_split": True} if settings.llm_provider == "minimax" else {},
             )
         except Exception as exc:  # noqa: BLE001
             status = getattr(exc, "status_code", None)
