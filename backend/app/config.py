@@ -63,9 +63,16 @@ class Settings(BaseSettings):
     reranker_max_length: int = 384
     reranker_cache_dir: str = "/app/data/rerankers"
     reranker_trust_remote_code: bool = False
+    # ─── Concurrency / Streaming ────────────────────────────
+    chat_max_concurrency: int = 1
+    chat_queue_timeout_seconds: float = 5.0
+    stream_queue_maxsize: int = 256
+    graph_thread_workers: int = 1
+    rag_thread_workers: int = 1
 
     # ─── Startup / Warmup ────────────────────────────
     model_warmup_enabled: bool = True
+
 
     # ─── RAG Tuning ──────────────────────────────────
     rag_top_k: int = 15          # Prompt-aligned candidate pool for reranker

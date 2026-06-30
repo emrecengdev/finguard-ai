@@ -7,17 +7,18 @@ import os
 import json
 import logging
 import asyncio
+import threading
 from pathlib import Path
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Depends, Security
+from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Depends, Security, Request
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
 from sse_starlette.sse import EventSourceResponse
 import jwt
-from typing import Literal
+from typing import Literal, Any
 
 from app.config import get_settings
 from app.rag import (
@@ -25,9 +26,15 @@ from app.rag import (
     get_runtime_optimization_status,
     ingest_pdf,
     list_documents,
-    warmup_runtime,
 )
-from app.graph import run_graph
+from app.graph import run_graph, run_graph_stream
+from app.runtime import (
+    init_runtime,
+    shutdown_executors,
+    run_rag_blocking,
+    get_chat_semaphore,
+    warmup_rag_blocking,
+)
 
 # ─── Logging ─────────────────────────────────────────────────────────
 
@@ -58,10 +65,13 @@ async def lifespan(app: FastAPI):
     logger.info(f"  Uploads: {settings.upload_dir}")
     logger.info(f"  Embedding Cache: {settings.embedding_cache_dir}")
     logger.info(f"  Reranker Cache: {settings.reranker_cache_dir}")
+    # Initialise bounded executors + chat semaphore (loop-bound).
+    init_runtime()
+    get_chat_semaphore()  # bind to the running loop eagerly
     if settings.model_warmup_enabled:
         try:
             logger.info("Starting RAG warmup (embedding + reranker + BM25)...")
-            status = await asyncio.to_thread(warmup_runtime)
+            status = await warmup_rag_blocking()
             logger.info(
                 "Warmup complete in %.3fs | embedding=%s | reranker=%s | bm25_docs=%s",
                 status.get("warmup_seconds", 0.0),
@@ -73,6 +83,7 @@ async def lifespan(app: FastAPI):
             logger.exception(f"Warmup failed: {e}")
     yield
     logger.info("FinGuard AI Backend shutting down.")
+    shutdown_executors()
 
 
 # ─── App ─────────────────────────────────────────────────────────────
@@ -301,7 +312,7 @@ async def upload_pdf(
                 raise HTTPException(status_code=400, detail=f"Invalid ocr_pages payload: {str(e)}")
 
         # Ingest into ChromaDB
-        result = await asyncio.to_thread(
+        result = await run_rag_blocking(
             ingest_pdf,
             file_path,
             safe_filename,
@@ -344,7 +355,7 @@ async def upload_pdf(
 async def get_documents(user: dict = Depends(verify_jwt_token)):
     """List all ingested documents."""
     try:
-        docs = await asyncio.to_thread(list_documents)
+        docs = await run_rag_blocking(list_documents)
         return [DocumentInfo(**d) for d in docs]
     except Exception as e:
         logger.error(f"List documents failed: {e}")
@@ -372,7 +383,7 @@ async def get_document_file(filename: str, user: dict = Depends(verify_jwt_token
 async def remove_document(filename: str, user: dict = Depends(verify_jwt_token)):
     """Delete a document from the knowledge base."""
     try:
-        result = await asyncio.to_thread(delete_document, filename)
+        result = await run_rag_blocking(delete_document, filename)
         if result["status"] == "not_found":
             raise HTTPException(status_code=404, detail=f"Document '{filename}' not found.")
         return DeleteResponse(**result)
@@ -392,61 +403,33 @@ async def chat(request: ChatRequest, user: dict = Depends(verify_jwt_token)):
     if not request.message.strip():
         raise HTTPException(status_code=400, detail="Message cannot be empty.")
 
+    settings = get_settings()
+    sem = get_chat_semaphore()
     try:
-        logger.info(
-            "Chat request: '%s...' (session: %s, locale: %s)",
-            request.message[:80],
-            request.session_id,
-            request.locale,
-        )
-
-        final_state = await run_graph(request.message, request.locale)
-
-        # Extract sources from RAG context
-        sources = []
-        for ctx in final_state.get("rag_context", []):
-            sources.append({
-                "source": ctx.get("source", ""),
-                "page": ctx.get("page", 0),
-                "rerank_score": ctx.get("rerank_score", 0),
-            })
-
-        return ChatResponse(
-            response=final_state.get("final_response", "An error occurred."),
-            agent_steps=final_state.get("agent_steps", []),
-            guardrail_passed=final_state.get("guardrail_passed", False),
-            sources=sources,
-        )
-
-    except Exception as e:
-        logger.error(f"Chat error: {e}")
-        raise HTTPException(status_code=500, detail=f"Agent pipeline failed: {str(e)}")
-
-
-@app.post("/chat/stream")
-async def chat_stream(request: ChatRequest, user: dict = Depends(verify_jwt_token)):
-    """
-    SSE streaming endpoint for the chat pipeline.
-    Streams agent steps as they execute, then the final response.
-    """
-    if not request.message.strip():
-        raise HTTPException(status_code=400, detail="Message cannot be empty.")
-
-    async def event_generator():
         try:
-            # We run the graph and then stream the steps
-            # (True streaming would require a custom LangGraph callback handler)
+            await asyncio.wait_for(sem.acquire(), timeout=settings.chat_queue_timeout_seconds)
+        except asyncio.TimeoutError:
+            logger.warning(
+                "Chat backpressure: 429 for session=%s (queue full)",
+                request.session_id,
+            )
+            raise HTTPException(
+                status_code=429,
+                detail="Chat backend is at capacity. Please retry shortly.",
+                headers={"Retry-After": str(max(1, int(settings.chat_queue_timeout_seconds)))},
+            )
+
+        try:
+            logger.info(
+                "Chat request: '%s...' (session: %s, locale: %s)",
+                request.message[:80],
+                request.session_id,
+                request.locale,
+            )
+
             final_state = await run_graph(request.message, request.locale)
 
-            # Stream each agent step
-            for step in final_state.get("agent_steps", []):
-                yield {
-                    "event": "agent_step",
-                    "data": json.dumps(step),
-                }
-                await asyncio.sleep(0.1)  # Small delay for UI effect
-
-            # Stream sources
+            # Extract sources from RAG context
             sources = []
             for ctx in final_state.get("rag_context", []):
                 sources.append({
@@ -455,23 +438,232 @@ async def chat_stream(request: ChatRequest, user: dict = Depends(verify_jwt_toke
                     "rerank_score": ctx.get("rerank_score", 0),
                 })
 
-            # Final response
-            yield {
-                "event": "response",
-                "data": json.dumps({
-                    "response": final_state.get("final_response", ""),
-                    "guardrail_passed": final_state.get("guardrail_passed", False),
-                    "sources": sources,
-                }),
-            }
+            return ChatResponse(
+                response=final_state.get("final_response", "An error occurred."),
+                agent_steps=final_state.get("agent_steps", []),
+                guardrail_passed=final_state.get("guardrail_passed", False),
+                sources=sources,
+            )
+        finally:
+            sem.release()
 
-            yield {"event": "done", "data": "{}"}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Chat error: {e}")
+        raise HTTPException(status_code=500, detail=f"Agent pipeline failed: {str(e)}")
 
+
+# ─── SSE streaming ──────────────────────────────────────────────────
+# A sentinel object that the executor side puts in the per-call queue to
+# tell the generator "graph is done, drain and close". We use a unique
+# object identity (not a dict) so a payload cannot collide.
+_DONE_SENTINEL: Any = object()
+
+
+def _build_sources(final_state: dict) -> list[dict]:
+    sources: list[dict] = []
+    for ctx in final_state.get("rag_context", []) or []:
+        sources.append({
+            "source": ctx.get("source", ""),
+            "page": ctx.get("page", 0),
+            "rerank_score": ctx.get("rerank_score", 0),
+        })
+    return sources
+
+
+@app.post("/chat/stream")
+async def chat_stream(
+    request_body: ChatRequest,
+    request: Request,
+    user: dict = Depends(verify_jwt_token),
+):
+    """
+    SSE streaming endpoint for the chat pipeline.
+
+    Architecture:
+      * The pipeline runs on the bounded `graph_executor` thread pool.
+      * Node progress and token deltas are pushed to an asyncio.Queue
+        from the executor thread via `asyncio.run_coroutine_threadsafe`;
+        the `.result()` call backpressures the worker when the queue
+        is full.
+      * `request.is_disconnected()` is awaited between reads so a
+        closed client is detected promptly and `cancel_event` flips.
+      * The chat semaphore bounds concurrent SSE streams.
+    """
+    if not request_body.message.strip():
+        raise HTTPException(status_code=400, detail="Message cannot be empty.")
+
+    settings = get_settings()
+
+    async def event_generator():
+        sem = get_chat_semaphore()
+        acquired = False
+        cancel = threading.Event()
+        loop = asyncio.get_running_loop()
+
+        try:
+            try:
+                await asyncio.wait_for(
+                    sem.acquire(), timeout=settings.chat_queue_timeout_seconds
+                )
+                acquired = True
+            except asyncio.TimeoutError:
+                logger.warning(
+                    "Stream backpressure: 429 for session=%s (queue full)",
+                    request_body.session_id,
+                )
+                yield {
+                    "event": "error",
+                    "data": json.dumps({
+                        "detail": "Chat backend is at capacity. Please retry shortly.",
+                        "retry_after": max(1, int(settings.chat_queue_timeout_seconds)),
+                    }),
+                }
+                return
+
+            q: asyncio.Queue = asyncio.Queue(maxsize=settings.stream_queue_maxsize)
+
+            def _emit(ev: dict) -> None:
+                # Backpressure WITH an escape hatch: block the executor
+                # thread while the queue has room, but NEVER hang forever.
+                # If the consumer disconnected/stalled, `cancel` is set and
+                # we raise so the worker escapes instead of deadlocking on a
+                # full queue nobody is draining.
+                if cancel.is_set():
+                    raise RuntimeError("stream consumer gone")
+                try:
+                    cfs_fut = asyncio.run_coroutine_threadsafe(q.put(ev), loop)
+                    cfs_fut.result(timeout=5.0)
+                except (TimeoutError, asyncio.TimeoutError):
+                    # Cancel the lingering put so it cannot enqueue a stale
+                    # event after we've declared the consumer gone.
+                    try:
+                        cfs_fut.cancel()
+                    except Exception:  # noqa: BLE001
+                        pass
+                    cancel.set()
+                    raise RuntimeError("stream queue stall (consumer not draining)")
+                except Exception:
+                    cancel.set()
+                    raise
+
+            fut = asyncio.ensure_future(
+                run_graph_stream(
+                    request_body.message,
+                    request_body.locale,
+                    _emit,
+                    cancel,
+                )
+            )
+
+            # Sentinel the generator will see when the pipeline finishes.
+            def _on_done(_):
+                if cancel.is_set():
+                    return
+                cfs_fut = None
+                try:
+                    cfs_fut = asyncio.run_coroutine_threadsafe(
+                        q.put(_DONE_SENTINEL), loop
+                    )
+                    cfs_fut.result(timeout=5.0)
+                except Exception:  # noqa: BLE001
+                    if cfs_fut is not None:
+                        try:
+                            cfs_fut.cancel()
+                        except Exception:  # noqa: BLE001
+                            pass
+
+            fut.add_done_callback(_on_done)
+
+            final_state: dict | None = None
+
+            while True:
+                # Detect client disconnect promptly.
+                if await request.is_disconnected():
+                    logger.info(
+                        "SSE client disconnected; cancelling pipeline (session=%s)",
+                        request_body.session_id,
+                    )
+                    cancel.set()
+                    break
+
+                # Wait for next event with a small idle window so we can
+                # re-check the disconnect flag and the future.
+                try:
+                    ev = await asyncio.wait_for(q.get(), timeout=1.0)
+                except asyncio.TimeoutError:
+                    # No event yet. If the future finished without
+                    # producing a sentinel (rare race), exit the loop.
+                    if fut.done():
+                        break
+                    continue
+
+                if ev is _DONE_SENTINEL:
+                    # Capture final state from the future for the
+                    # authoritative 'response' event.
+                    try:
+                        final_state = fut.result()
+                    except Exception as fut_exc:  # noqa: BLE001
+                        logger.error(f"Pipeline future failed: {fut_exc}")
+                        yield {
+                            "event": "error",
+                            "data": json.dumps({"detail": str(fut_exc)}),
+                        }
+                        return
+                    break
+
+                # Normal event passthrough.
+                yield ev
+
+            # ─── Final 'response' event (authoritative; after guardrail) ───
+            if final_state is not None:
+                yield {
+                    "event": "response",
+                    "data": json.dumps({
+                        "response": final_state.get("final_response", ""),
+                        "guardrail_passed": final_state.get("guardrail_passed", False),
+                        "sources": _build_sources(final_state),
+                    }),
+                }
+                yield {"event": "done", "data": "{}"}
+            else:
+                # Client disconnected before completion; close cleanly.
+                yield {
+                    "event": "error",
+                    "data": json.dumps({"detail": "Client disconnected."}),
+                }
+
+        except asyncio.CancelledError:
+            cancel.set()
+            logger.info("SSE generator cancelled by server (session=%s)", request_body.session_id)
+            raise
         except Exception as e:
             logger.error(f"Stream error: {e}")
-            yield {
-                "event": "error",
-                "data": json.dumps({"detail": str(e)}),
-            }
+            try:
+                yield {
+                    "event": "error",
+                    "data": json.dumps({"detail": str(e)}),
+                }
+            except Exception:  # noqa: BLE001
+                pass
+        finally:
+            cancel.set()
+            if acquired:
+                try:
+                    sem.release()
+                except Exception:  # noqa: BLE001
+                    pass
+            # Cancel the future defensively (in case the loop exited early).
+            if 'fut' in locals() and not fut.done():
+                fut.cancel()
 
-    return EventSourceResponse(event_generator())
+    return EventSourceResponse(
+        event_generator(),
+        ping=15,
+        send_timeout=30,
+        headers={
+            "Cache-Control": "no-cache, no-transform",
+            "X-Accel-Buffering": "no",
+        },
+    )

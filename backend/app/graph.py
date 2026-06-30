@@ -5,13 +5,12 @@ StateGraph: Router → RAG / Tool / Parallel → Synthesizer → Guardrail → E
 
 import json
 import logging
-import asyncio
 from typing import TypedDict, Literal, Any
 
 from langgraph.graph import StateGraph, END
 
 from app.config import get_settings
-from app.llm import _call_llm
+from app.llm import _call_llm, _call_llm_stream
 from app.rag import retrieve
 from app.tools import execute_tool, get_tools_description, TOOL_REGISTRY
 
@@ -24,6 +23,57 @@ def _locale_name(locale: str) -> str:
 
 def _localized_message(locale: str, message_tr: str, message_en: str) -> str:
     return message_tr if locale == "tr" else message_en
+
+
+# ─── Streaming / Cancellation plumbing ────────────────────────────────
+# Nodes are kept SYNC; the FastAPI side bridges their output through an
+# asyncio.Queue (see main.event_generator). These helpers give the nodes a
+# uniform way to read the per-call `config` dict LangGraph passes as a
+# second positional arg, and to push progress events back to the SSE
+# consumer.
+
+_STREAM_SENTINEL = object()  # marks "graph done" in the per-call queue
+
+
+def _node_config(config: Any) -> dict:
+    """Return the `configurable` dict for this node invocation."""
+    if not config:
+        return {}
+    return config.get("configurable", {}) or {}
+
+
+def _emit_node_step(emit: Any, step: dict) -> None:
+    """Push an `agent_step` event if a streaming emit is bound.
+
+    Synchronous nodes cannot `await`, so this is a synchronous side-effect
+    helper. The FastAPI side wraps the call in `run_coroutine_threadsafe`
+    with a maxsize queue, which gives us natural backpressure: when the
+    client falls behind, the executor thread blocks on `q.put()` instead
+    of producing unbounded events.
+    """
+    if emit is None:
+        return
+    try:
+        emit({"event": "agent_step", "data": json.dumps(step)})
+    except Exception:  # noqa: BLE001
+        # The stream may already be closed (client disconnect). Never let
+        # an emit failure kill a node — the cancel_event will surface the
+        # disconnect on the next cooperative check.
+        logger.debug("emit(agent_step) failed; stream likely closed.")
+
+
+def _check_cancel(cancel: Any) -> bool:
+    """Return True if cancellation was requested. Nodes should treat this
+    as a cooperative checkpoint and return early / raise."""
+    return cancel is not None and cancel.is_set()
+
+
+def _cancelled_step(node: str) -> dict:
+    return {
+        "node": node,
+        "status": "cancelled",
+        "detail": "Cancelled by client.",
+    }
 
 
 # ─── State Schema ────────────────────────────────────────────────────
@@ -82,11 +132,20 @@ You MUST respond with ONLY a valid JSON object (no markdown, no explanation):
 }}"""
 
 
-def router_node(state: AgentState) -> AgentState:
+def router_node(state: AgentState, config: Any = None) -> AgentState:
     """Analyze user input and determine routing."""
     step = {"node": "router", "status": "analyzing", "detail": "Classifying intent..."}
     steps = list(state.get("agent_steps", []))
     steps.append(step)
+    cfg = _node_config(config)
+    emit = cfg.get("stream_emit")
+    cancel = cfg.get("cancel_event")
+
+    if _check_cancel(cancel):
+        step = _cancelled_step("router")
+        steps[-1] = step
+        _emit_node_step(emit, step)
+        return {**state, "agent_steps": steps, "error": "cancelled"}
 
     try:
         response = _call_llm(ROUTER_SYSTEM_PROMPT, state["user_message"])
@@ -106,9 +165,16 @@ def router_node(state: AgentState) -> AgentState:
         tool_name = parsed.get("tool_name", "") or ""
         tool_args = parsed.get("tool_args", {}) or {}
 
+        if _check_cancel(cancel):
+            step = _cancelled_step("router")
+            steps[-1] = step
+            _emit_node_step(emit, step)
+            return {**state, "agent_steps": steps, "error": "cancelled"}
+
         step["status"] = "complete"
         step["detail"] = f"Route: {route}. {reasoning}" + (f" [filter: {source_hint}]" if source_hint else "")
         steps[-1] = step
+        _emit_node_step(emit, dict(step))
 
         return {
             **state,
@@ -125,6 +191,7 @@ def router_node(state: AgentState) -> AgentState:
         step["status"] = "error"
         step["detail"] = f"Router failed: {str(e)}"
         steps[-1] = step
+        _emit_node_step(emit, dict(step))
         return {
             **state,
             "route": "rag",
@@ -135,15 +202,30 @@ def router_node(state: AgentState) -> AgentState:
 
 # ─── Node: RAG (Knowledge Retrieval) ────────────────────────────────
 
-def rag_node(state: AgentState) -> AgentState:
+def rag_node(state: AgentState, config: Any = None) -> AgentState:
     """Query ChromaDB, rerank results, return top context chunks."""
     step = {"node": "rag", "status": "searching", "detail": "Querying knowledge base..."}
     steps = list(state.get("agent_steps", []))
     steps.append(step)
+    cfg = _node_config(config)
+    emit = cfg.get("stream_emit")
+    cancel = cfg.get("cancel_event")
+
+    if _check_cancel(cancel):
+        step = _cancelled_step("rag")
+        steps[-1] = step
+        _emit_node_step(emit, step)
+        return {**state, "rag_context": [], "agent_steps": steps, "error": "cancelled"}
 
     try:
         source_filter = state.get("source_hint", "") or None
         results = retrieve(state["user_message"], source_filter=source_filter)
+
+        if _check_cancel(cancel):
+            step = _cancelled_step("rag")
+            steps[-1] = step
+            _emit_node_step(emit, step)
+            return {**state, "rag_context": [], "agent_steps": steps, "error": "cancelled"}
 
         if results:
             sources = [f"{r['source']} (p.{r['page']})" for r in results]
@@ -154,6 +236,7 @@ def rag_node(state: AgentState) -> AgentState:
             step["detail"] = "No relevant documents found in knowledge base."
 
         steps[-1] = step
+        _emit_node_step(emit, dict(step))
         return {**state, "rag_context": results, "agent_steps": steps}
 
     except Exception as e:
@@ -161,6 +244,7 @@ def rag_node(state: AgentState) -> AgentState:
         step["status"] = "error"
         step["detail"] = f"RAG retrieval failed: {str(e)}"
         steps[-1] = step
+        _emit_node_step(emit, dict(step))
         return {
             **state,
             "rag_context": [],
@@ -171,7 +255,7 @@ def rag_node(state: AgentState) -> AgentState:
 
 # ─── Node: Tool Execution ────────────────────────────────────────────
 
-def tool_node(state: AgentState) -> AgentState:
+def tool_node(state: AgentState, config: Any = None) -> AgentState:
     """Execute the tool selected by the router."""
     tool_name = state.get("tool_name", "")
     tool_args = state.get("tool_args", {})
@@ -183,18 +267,36 @@ def tool_node(state: AgentState) -> AgentState:
     }
     steps = list(state.get("agent_steps", []))
     steps.append(step)
+    cfg = _node_config(config)
+    emit = cfg.get("stream_emit")
+    cancel = cfg.get("cancel_event")
+
+    if _check_cancel(cancel):
+        step = _cancelled_step("tool")
+        steps[-1] = step
+        _emit_node_step(emit, step)
+        return {**state, "tool_result": "", "agent_steps": steps, "error": "cancelled"}
 
     if not tool_name:
         step["status"] = "skipped"
         step["detail"] = "No tool specified."
         steps[-1] = step
+        _emit_node_step(emit, dict(step))
         return {**state, "tool_result": "", "agent_steps": steps}
 
     try:
         result = execute_tool(tool_name, tool_args)
+
+        if _check_cancel(cancel):
+            step = _cancelled_step("tool")
+            steps[-1] = step
+            _emit_node_step(emit, step)
+            return {**state, "tool_result": "", "agent_steps": steps, "error": "cancelled"}
+
         step["status"] = "complete"
         step["detail"] = f"Tool '{tool_name}' executed successfully."
         steps[-1] = step
+        _emit_node_step(emit, dict(step))
         return {**state, "tool_result": result, "agent_steps": steps}
 
     except Exception as e:
@@ -202,6 +304,7 @@ def tool_node(state: AgentState) -> AgentState:
         step["status"] = "error"
         step["detail"] = f"Tool execution failed: {str(e)}"
         steps[-1] = step
+        _emit_node_step(emit, dict(step))
         return {**state, "tool_result": f"Error: {str(e)}", "agent_steps": steps}
 
 
@@ -230,12 +333,15 @@ Rules:
 15. If a tool result contains `simulated: true`, clearly label it as a simulation/demo estimate."""
 
 
-def synthesizer_node(state: AgentState) -> AgentState:
+def synthesizer_node(state: AgentState, config: Any = None) -> AgentState:
     """Combine RAG context and tool results into a cohesive response."""
     step = {"node": "synthesizer", "status": "composing", "detail": "Drafting response..."}
     steps = list(state.get("agent_steps", []))
     steps.append(step)
     response_locale = state.get("response_locale", "tr")
+    cfg = _node_config(config)
+    emit = cfg.get("stream_emit")
+    cancel = cfg.get("cancel_event")
 
     # Build context block
     context_parts = []
@@ -270,6 +376,7 @@ def synthesizer_node(state: AgentState) -> AgentState:
             step["status"] = "error"
             step["detail"] = retrieval_error
             steps[-1] = step
+            _emit_node_step(emit, dict(step))
             return {**state, "synthesized_response": fallback, "agent_steps": steps}
 
         fallback = _localized_message(
@@ -290,6 +397,7 @@ def synthesizer_node(state: AgentState) -> AgentState:
         step["status"] = "skipped"
         step["detail"] = "Zero documents loaded. LLM execution skipped to prevent hallucination."
         steps[-1] = step
+        _emit_node_step(emit, dict(step))
         return {**state, "synthesized_response": fallback, "agent_steps": steps}
 
     combined_context = "\n\n".join(context_parts)
@@ -301,10 +409,57 @@ def synthesizer_node(state: AgentState) -> AgentState:
     )
 
     try:
-        response = _call_llm(SYNTHESIZER_SYSTEM_PROMPT, user_prompt)
+        if emit is not None:
+            # ─── Streaming path: push token_delta events, accumulate text.
+            # Provisional text is shown live; the guardrail node re-validates
+            # and the final 'response' event (after guardrail) is authoritative.
+            buffer_parts: list[str] = []
+            try:
+                for delta in _call_llm_stream(
+                    SYNTHESIZER_SYSTEM_PROMPT,
+                    user_prompt,
+                    cancel_event=cancel,
+                ):
+                    if not delta:
+                        continue
+                    buffer_parts.append(delta)
+                    try:
+                        emit({
+                            "event": "token_delta",
+                            "data": json.dumps({"delta": delta, "provisional": True}),
+                        })
+                    except Exception:  # noqa: BLE001
+                        # Consumer gone/stalled (cancel set upstream). Stop
+                        # emitting and keep the partial buffer so the worker
+                        # thread escapes instead of deadlocking on a full queue.
+                        logger.debug("emit(token_delta) failed; stopping stream.")
+                        break
+                response = "".join(buffer_parts)
+            except Exception as stream_exc:  # noqa: BLE001
+                # If the iterator raised mid-stream, surface the partial
+                # buffer as a best-effort fallback; the existing error
+                # path below will produce a localized message.
+                response = "".join(buffer_parts)
+                if not response:
+                    raise stream_exc
+                logger.warning(
+                    "Synthesizer stream interrupted after %d chars: %s",
+                    len(response),
+                    stream_exc,
+                )
+        else:
+            response = _call_llm(SYNTHESIZER_SYSTEM_PROMPT, user_prompt)
+
+        if _check_cancel(cancel):
+            step = _cancelled_step("synthesizer")
+            steps[-1] = step
+            _emit_node_step(emit, step)
+            return {**state, "synthesized_response": response, "agent_steps": steps, "error": "cancelled"}
+
         step["status"] = "complete"
         step["detail"] = "Response composed."
         steps[-1] = step
+        _emit_node_step(emit, dict(step))
         return {**state, "synthesized_response": response, "agent_steps": steps}
 
     except Exception as e:
@@ -323,6 +478,7 @@ def synthesizer_node(state: AgentState) -> AgentState:
         step["status"] = "error"
         step["detail"] = f"Synthesis failed: {str(e)}"
         steps[-1] = step
+        _emit_node_step(emit, dict(step))
         return {**state, "synthesized_response": fallback, "agent_steps": steps}
 
 
@@ -348,11 +504,14 @@ Respond with ONLY a valid JSON object:
 }"""
 
 
-def guardrail_node(state: AgentState) -> AgentState:
+def guardrail_node(state: AgentState, config: Any = None) -> AgentState:
     """Final compliance check on the synthesized response."""
     step = {"node": "guardrail", "status": "checking", "detail": "Running compliance check..."}
     steps = list(state.get("agent_steps", []))
     steps.append(step)
+    cfg = _node_config(config)
+    emit = cfg.get("stream_emit")
+    cancel = cfg.get("cancel_event")
 
     synthesized = state.get("synthesized_response", "")
     response_locale = state.get("response_locale", "tr")
@@ -360,6 +519,7 @@ def guardrail_node(state: AgentState) -> AgentState:
         step["status"] = "error"
         step["detail"] = "No response to evaluate."
         steps[-1] = step
+        _emit_node_step(emit, dict(step))
         return {
             **state,
             "final_response": _localized_message(
@@ -371,11 +531,35 @@ def guardrail_node(state: AgentState) -> AgentState:
             "agent_steps": steps,
         }
 
+    if _check_cancel(cancel):
+        step = _cancelled_step("guardrail")
+        steps[-1] = step
+        _emit_node_step(emit, step)
+        return {
+            **state,
+            "final_response": synthesized,
+            "guardrail_passed": False,
+            "agent_steps": steps,
+            "error": "cancelled",
+        }
+
     try:
         result = _call_llm(
             GUARDRAIL_SYSTEM_PROMPT,
             f"Evaluate this response:\n\n{synthesized}",
         )
+
+        if _check_cancel(cancel):
+            step = _cancelled_step("guardrail")
+            steps[-1] = step
+            _emit_node_step(emit, step)
+            return {
+                **state,
+                "final_response": synthesized,
+                "guardrail_passed": False,
+                "agent_steps": steps,
+                "error": "cancelled",
+            }
 
         # Parse JSON
         clean = result.strip()
@@ -398,6 +582,7 @@ def guardrail_node(state: AgentState) -> AgentState:
             step["detail"] = f"Compliance issue: {reason}"
 
         steps[-1] = step
+        _emit_node_step(emit, dict(step))
         return {
             **state,
             "final_response": modified,
@@ -410,6 +595,7 @@ def guardrail_node(state: AgentState) -> AgentState:
         step["status"] = "error"
         step["detail"] = f"Guardrail check failed: {str(e)}. Response blocked."
         steps[-1] = step
+        _emit_node_step(emit, dict(step))
         return {
             **state,
             "final_response": _localized_message(
@@ -508,10 +694,63 @@ def get_graph():
 
 
 async def run_graph(user_message: str, response_locale: Literal["tr", "en"] = "tr") -> AgentState:
-    """Execute the full agent pipeline for a user message."""
+    """Execute the full agent pipeline for a user message.
+
+    Non-streaming path: no `stream_emit` is bound, so each node runs
+    synchronously without emitting events. The final state is returned
+    in one shot — this matches the original /chat behaviour.
+    """
     graph = get_graph()
 
-    initial_state: AgentState = {
+    initial_state: AgentState = _initial_state(user_message, response_locale)
+    config: dict = {"configurable": {}}
+
+    # Use the bounded graph executor (falls back to asyncio.to_thread in
+    # the unlikely case the executor was never initialised).
+    from app.runtime import run_graph_blocking
+
+    final_state = await run_graph_blocking(graph.invoke, initial_state, config)
+    return final_state
+
+
+async def run_graph_stream(
+    user_message: str,
+    response_locale: Literal["tr", "en"],
+    emit: Any,
+    cancel_event: Any,
+) -> AgentState:
+    """Execute the full agent pipeline and stream events through `emit`.
+
+    `emit` is a synchronous callable that the FastAPI event_generator
+    builds from `asyncio.run_coroutine_threadsafe(q.put, loop).result()`.
+    It blocks the executor thread when the queue is full, providing
+    natural backpressure so a slow client cannot exhaust memory.
+
+    `cancel_event` is a `threading.Event` the generator sets on client
+    disconnect; nodes check it cooperatively and the LLM stream
+    primitive honours it between chunks.
+
+    Returns the final AgentState so the caller can build the authoritative
+    'response' event (with sources) for the SSE stream.
+    """
+    graph = get_graph()
+
+    initial_state: AgentState = _initial_state(user_message, response_locale)
+    config: dict = {
+        "configurable": {
+            "stream_emit": emit,
+            "cancel_event": cancel_event,
+        }
+    }
+
+    from app.runtime import submit_graph
+
+    return await submit_graph(graph.invoke, initial_state, config)
+
+
+def _initial_state(user_message: str, response_locale: Literal["tr", "en"]) -> AgentState:
+    """Build a fresh AgentState for one pipeline run."""
+    return {
         "user_message": user_message,
         "response_locale": response_locale,
         "route": "",
@@ -526,7 +765,3 @@ async def run_graph(user_message: str, response_locale: Literal["tr", "en"] = "t
         "agent_steps": [],
         "error": "",
     }
-
-    # Run the graph
-    final_state = await asyncio.to_thread(graph.invoke, initial_state)
-    return final_state

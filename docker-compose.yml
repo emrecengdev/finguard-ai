@@ -19,8 +19,9 @@ services:
       - PYTHONUNBUFFERED=1
       - HF_HOME=/app/data/hf
       - TOKENIZERS_PARALLELISM=false
-      - OMP_NUM_THREADS=2
-      - MKL_NUM_THREADS=2
+      - OMP_NUM_THREADS=1
+      - MKL_NUM_THREADS=1
+      - ORT_NUM_THREADS=1
     healthcheck:
       test: [ "CMD", "curl", "-f", "http://localhost:8000/health" ]
       interval: 30s
