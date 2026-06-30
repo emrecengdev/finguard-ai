@@ -206,12 +206,23 @@ class GeminiEmbeddingClient:
                     request_payload["title"] = title
                 requests.append(request_payload)
 
-            response = client.post(
-                f"{self.base_url}/models/{self.model}:batchEmbedContents",
-                json={"requests": requests},
-            )
-            response.raise_for_status()
-            payload = response.json()
+            # Retry transient rate-limiting / server errors. Tier 2 keys can
+            # still see brief 429 bursts (e.g. concurrent warmup across 2
+            # uvicorn workers). Auth / other 4xx raise immediately.
+            payload = None
+            for attempt in range(4):
+                response = client.post(
+                    f"{self.base_url}/models/{self.model}:batchEmbedContents",
+                    json={"requests": requests},
+                )
+                if response.status_code == 429 or response.status_code >= 500:
+                    if attempt == 3:
+                        response.raise_for_status()
+                    time.sleep(min(2 ** attempt, 8))
+                    continue
+                response.raise_for_status()
+                payload = response.json()
+                break
             batch_embeddings = payload.get("embeddings", [])
 
             if len(batch_embeddings) != len(batch):
