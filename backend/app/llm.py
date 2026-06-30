@@ -53,6 +53,7 @@ _rr_counter = itertools.count()
 # Header that carries the binding short-window remaining budget. Cerebras
 # exposes x-ratelimit-remaining-requests-minute; other providers may differ.
 _REMAINING_HEADER = "x-ratelimit-remaining-requests-minute"
+_COOLDOWN_WAIT_CAP = 5.0  # if all keys are cooling, wait at most this long for the soonest reset
 
 
 def _resolve_keys(settings) -> list:
@@ -101,14 +102,26 @@ def _get_clients(settings) -> list:
 
 def _pick_key(n: int) -> int:
     """Choose the best key index: most remaining quota, not in cooldown,
-    fewest in-flight; rotation as the final tiebreak."""
+    fewest in-flight; rotation as the final tiebreak.
+
+    If ALL keys are in a 429 cooldown, do NOT immediately hammer one: wait
+    (capped at _COOLDOWN_WAIT_CAP) for the soonest to reset, or raise a
+    clear 'all keys rate-limited' so the caller degrades gracefully.
+    """
     now = monotonic()
     k = next(_rr_counter)
     with _state_lock:
         avail = [i for i in range(n) if _key_state[i]["cooldown_until"] <= now]
-        pool = avail if avail else list(range(n))
-        pool.sort(key=lambda i: (-_key_state[i]["remaining"], _key_state[i]["inflight"], (i - k) % n))
-        return pool[0]
+        if avail:
+            avail.sort(key=lambda i: (-_key_state[i]["remaining"], _key_state[i]["inflight"], (i - k) % n))
+            return avail[0]
+        # All in cooldown: find the soonest reset (don't hold the lock while sleeping).
+        soonest = min(range(n), key=lambda i: _key_state[i]["cooldown_until"])
+        wait = max(0.0, _key_state[soonest]["cooldown_until"] - now)
+    if wait <= _COOLDOWN_WAIT_CAP:
+        time.sleep(wait + 0.05)
+        return soonest
+    raise RuntimeError("all LLM API keys are rate-limited; please retry shortly")
 
 
 def _set_remaining(idx: int, headers) -> None:
