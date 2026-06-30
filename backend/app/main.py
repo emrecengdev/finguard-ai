@@ -499,9 +499,6 @@ async def chat_stream(
     async def event_generator():
         sem = get_chat_semaphore()
         acquired = False
-        cancel = threading.Event()
-        loop = asyncio.get_running_loop()
-
         try:
             try:
                 await asyncio.wait_for(
@@ -522,135 +519,44 @@ async def chat_stream(
                 }
                 return
 
-            q: asyncio.Queue = asyncio.Queue(maxsize=settings.stream_queue_maxsize)
+            # Run the proven pipeline (same path as /chat). Events stream as
+            # soon as the pipeline completes — chosen for reliability over
+            # token-level streaming, which depends on a fragile thread/queue
+            # bridge and is a follow-up. Client disconnect cancels this
+            # generator (CancelledError below).
+            final_state = await run_graph(request_body.message, request_body.locale)
 
-            def _emit(ev: dict) -> None:
-                # Backpressure WITH an escape hatch: block the executor
-                # thread while the queue has room, but NEVER hang forever.
-                # If the consumer disconnected/stalled, `cancel` is set and
-                # we raise so the worker escapes instead of deadlocking on a
-                # full queue nobody is draining.
-                if cancel.is_set():
-                    raise RuntimeError("stream consumer gone")
-                try:
-                    cfs_fut = asyncio.run_coroutine_threadsafe(q.put(ev), loop)
-                    cfs_fut.result(timeout=5.0)
-                except (TimeoutError, asyncio.TimeoutError):
-                    # Cancel the lingering put so it cannot enqueue a stale
-                    # event after we've declared the consumer gone.
-                    try:
-                        cfs_fut.cancel()
-                    except Exception:  # noqa: BLE001
-                        pass
-                    cancel.set()
-                    raise RuntimeError("stream queue stall (consumer not draining)")
-                except Exception:
-                    cancel.set()
-                    raise
+            for step in final_state.get("agent_steps", []):
+                yield {"event": "agent_step", "data": json.dumps(step)}
 
-            fut = asyncio.ensure_future(
-                run_graph_stream(
-                    request_body.message,
-                    request_body.locale,
-                    _emit,
-                    cancel,
-                )
-            )
-
-            # Sentinel the generator will see when the pipeline finishes.
-            def _on_done(_):
-                if cancel.is_set():
-                    return
-                cfs_fut = None
-                try:
-                    cfs_fut = asyncio.run_coroutine_threadsafe(
-                        q.put(_DONE_SENTINEL), loop
-                    )
-                    cfs_fut.result(timeout=5.0)
-                except Exception:  # noqa: BLE001
-                    if cfs_fut is not None:
-                        try:
-                            cfs_fut.cancel()
-                        except Exception:  # noqa: BLE001
-                            pass
-
-            fut.add_done_callback(_on_done)
-
-            final_state: dict | None = None
-
-            while True:
-                # Wait for the next event from the pipeline. Client
-                # disconnect is handled by Starlette cancelling this
-                # generator (CancelledError below) — do NOT poll
-                # request.is_disconnected(), which returns false positives
-                # once the POST request body has been fully consumed.
-                try:
-                    ev = await asyncio.wait_for(q.get(), timeout=2.0)
-                except asyncio.TimeoutError:
-                    # No event yet. If the future finished without emitting
-                    # a sentinel (rare race), finalize.
-                    if fut.done():
-                        break
-                    continue
-
-                if ev is _DONE_SENTINEL:
-                    # Capture final state from the future for the
-                    # authoritative 'response' event.
-                    try:
-                        final_state = fut.result()
-                    except Exception as fut_exc:  # noqa: BLE001
-                        logger.error(f"Pipeline future failed: {fut_exc}")
-                        yield {
-                            "event": "error",
-                            "data": json.dumps({"detail": str(fut_exc)}),
-                        }
-                        return
-                    break
-
-                # Normal event passthrough.
-                yield ev
-
-            # ─── Final 'response' event (authoritative; after guardrail) ───
-            if final_state is not None:
-                yield {
-                    "event": "response",
-                    "data": json.dumps({
-                        "response": final_state.get("final_response", ""),
-                        "guardrail_passed": final_state.get("guardrail_passed", False),
-                        "sources": _build_sources(final_state),
-                    }),
-                }
-                yield {"event": "done", "data": "{}"}
-            else:
-                # Client disconnected before completion; close cleanly.
-                yield {
-                    "event": "error",
-                    "data": json.dumps({"detail": "Client disconnected."}),
-                }
+            yield {
+                "event": "response",
+                "data": json.dumps({
+                    "response": final_state.get("final_response", ""),
+                    "guardrail_passed": final_state.get("guardrail_passed", False),
+                    "sources": _build_sources(final_state),
+                }),
+            }
+            yield {"event": "done", "data": "{}"}
 
         except asyncio.CancelledError:
-            cancel.set()
-            logger.info("SSE generator cancelled by server (session=%s)", request_body.session_id)
+            logger.info(
+                "SSE generator cancelled (client disconnect) session=%s",
+                request_body.session_id,
+            )
             raise
         except Exception as e:
             logger.error(f"Stream error: {e}")
             try:
-                yield {
-                    "event": "error",
-                    "data": json.dumps({"detail": str(e)}),
-                }
+                yield {"event": "error", "data": json.dumps({"detail": str(e)})}
             except Exception:  # noqa: BLE001
                 pass
         finally:
-            cancel.set()
             if acquired:
                 try:
                     sem.release()
                 except Exception:  # noqa: BLE001
                     pass
-            # Cancel the future defensively (in case the loop exited early).
-            if 'fut' in locals() and not fut.done():
-                fut.cancel()
 
     return EventSourceResponse(
         event_generator(),
