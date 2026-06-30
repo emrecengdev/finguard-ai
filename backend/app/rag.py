@@ -20,6 +20,7 @@ from collections import Counter
 
 import chromadb
 from chromadb.utils import embedding_functions
+from chromadb.config import Settings
 import httpx
 from huggingface_hub import snapshot_download
 from sentence_transformers import (
@@ -418,7 +419,10 @@ def _get_collection() -> chromadb.Collection:
         settings = get_settings()
         os.makedirs(settings.chroma_persist_dir, exist_ok=True)
         logger.info(f"Initializing ChromaDB at: {settings.chroma_persist_dir}")
-        _chroma_client = chromadb.PersistentClient(path=settings.chroma_persist_dir)
+        _chroma_client = chromadb.PersistentClient(
+            path=settings.chroma_persist_dir,
+            settings=Settings(anonymized_telemetry=False),
+        )
         collection_name = _collection_name()
         logger.info("Using Chroma collection: %s", collection_name)
         _collection = _chroma_client.get_or_create_collection(

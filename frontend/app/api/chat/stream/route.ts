@@ -10,6 +10,7 @@ export async function POST(request: NextRequest) {
       body: rawBody,
       headers: { "Content-Type": "application/json" },
       method: "POST",
+      signal: request.signal,
     });
 
     if (!backendResponse.ok || !backendResponse.body) {

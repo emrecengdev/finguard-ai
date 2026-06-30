@@ -48,7 +48,12 @@ async def lifespan(app: FastAPI):
     os.makedirs(settings.embedding_cache_dir, exist_ok=True)
     os.makedirs(settings.reranker_cache_dir, exist_ok=True)
     logger.info("FinGuard AI Backend starting up...")
-    logger.info(f"  Model: {settings.cerebras_model}")
+    logger.info(
+        "  LLM: provider=%s model=%s base_url_host=%s",
+        settings.llm_provider,
+        settings.llm_model,
+        settings.llm_base_url.split("//", 1)[-1].split("/", 1)[0],
+    )
     logger.info(f"  ChromaDB: {settings.chroma_persist_dir}")
     logger.info(f"  Uploads: {settings.upload_dir}")
     logger.info(f"  Embedding Cache: {settings.embedding_cache_dir}")

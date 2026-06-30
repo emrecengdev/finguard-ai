@@ -84,6 +84,7 @@ const translations = {
     "chat.pipeline_pending": { tr: "Beklemede", en: "Pending" },
     "chat.error_prefix": { tr: "Hata", en: "Error" },
     "chat.error_generic": { tr: "Beklenmeyen hata oluştu", en: "Unexpected failure" },
+    "chat.stopped": { tr: "Yanıt durduruldu", en: "Response stopped" },
 
     // ─── Suggestions (Empty State) ─────────────────────
     "suggestion.upload": {

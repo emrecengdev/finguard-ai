@@ -9,9 +9,21 @@ from functools import lru_cache
 
 
 class Settings(BaseSettings):
-    # ─── LLM ─────────────────────────────────────────
-    cerebras_api_key: str = ""
-    cerebras_model: str = "gpt-oss-120b"
+    # ─── LLM (provider-neutral; default: MiniMax via OpenAI-compatible API) ──────
+    llm_provider: str = "minimax"
+    llm_base_url: str = "https://api.minimax.io/v1"
+    llm_api_key: str = ""
+    llm_model: str = "MiniMax-M2.7-highspeed"
+    llm_max_completion_tokens: int = 2048
+    llm_temperature: float = 0.1
+    # Network / retry reliability knobs
+    llm_connect_timeout_seconds: float = 5.0
+    llm_read_timeout_seconds: float = 60.0
+    llm_write_timeout_seconds: float = 10.0
+    llm_pool_timeout_seconds: float = 5.0
+    llm_max_retries: int = 3
+    llm_retry_base_seconds: float = 0.5
+    llm_retry_cap_seconds: float = 4.0
 
     # ─── ChromaDB ────────────────────────────────────
     chroma_persist_dir: str = "/app/data/chromadb"

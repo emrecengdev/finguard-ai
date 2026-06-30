@@ -6,13 +6,12 @@ StateGraph: Router → RAG / Tool / Parallel → Synthesizer → Guardrail → E
 import json
 import logging
 import asyncio
-import time
 from typing import TypedDict, Literal, Any
 
 from langgraph.graph import StateGraph, END
-from cerebras.cloud.sdk import Cerebras
 
 from app.config import get_settings
+from app.llm import _call_llm
 from app.rag import retrieve
 from app.tools import execute_tool, get_tools_description, TOOL_REGISTRY
 
@@ -44,57 +43,6 @@ class AgentState(TypedDict):
     guardrail_passed: bool
     agent_steps: list[dict]          # Trace of agent thinking steps
     error: str
-
-
-# ─── LLM Client ──────────────────────────────────────────────────────
-
-def _call_llm(system_prompt: str, user_prompt: str) -> str:
-    """Call Cerebras API with system + user prompt."""
-    settings = get_settings()
-
-    if not settings.cerebras_api_key:
-        raise ValueError("CEREBRAS_API_KEY is not configured")
-
-    client = Cerebras(api_key=settings.cerebras_api_key)
-    retry_delays = (1, 2, 4)
-    last_error: Exception | None = None
-
-    for attempt, retry_delay in enumerate((0, *retry_delays), start=1):
-        try:
-            response = client.chat.completions.create(
-                model=settings.cerebras_model,
-                messages=[
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": user_prompt},
-                ],
-                temperature=0.1,
-                max_tokens=2048,
-            )
-            return response.choices[0].message.content.strip()
-        except Exception as e:
-            last_error = e
-            error_text = str(e).lower()
-            is_retryable = any(
-                marker in error_text
-                for marker in ("queue_exceeded", "too_many_requests", "high traffic", "429")
-            )
-
-            if not is_retryable or attempt > len(retry_delays):
-                raise
-
-            logger.warning(
-                "Transient Cerebras API error on attempt %s/%s. Retrying in %ss. Error: %s",
-                attempt,
-                len(retry_delays) + 1,
-                retry_delay,
-                str(e),
-            )
-            time.sleep(retry_delay)
-
-    if last_error is not None:
-        raise last_error
-
-    raise RuntimeError("Cerebras API call failed without returning a response")
 
 
 # ─── Node: Router ────────────────────────────────────────────────────

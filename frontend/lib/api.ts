@@ -132,14 +132,24 @@ export async function streamMessage(
     onStep: (step: AgentStep) => void,
     onResponse: (data: { response: string; guardrail_passed: boolean; sources: ChatSource[] }) => void,
     onError: (error: string) => void,
+    signal?: AbortSignal,
 ): Promise<void> {
     const payload: ChatRequestPayload = { message, session_id: sessionId, locale };
+
+    // Internal controller lets us abort the fetch on either an external caller
+    // signal (user clicked Stop) OR the no-bytes watchdog (server stalled).
+    const internalController = new AbortController();
+    const linkedSignal = signal
+        ? AbortSignal.any([signal, internalController.signal])
+        : internalController.signal;
+
     const res = await fetch("/api/chat/stream", {
         method: "POST",
         headers: {
             "Content-Type": "application/json",
         },
         body: JSON.stringify(payload),
+        signal: linkedSignal,
     });
 
     if (!res.ok) {
@@ -187,26 +197,65 @@ export async function streamMessage(
         }
     };
 
-    while (true) {
-        const { done, value } = await reader.read();
-        if (done) {
-            break;
+    // No-bytes watchdog: reset on every chunk that actually carries data so
+    // a long, valid streamed answer is never killed by a total timer. Fires
+    // only when the upstream stalls (TCP half-open, backend stuck, etc.).
+    const NO_BYTES_TIMEOUT_MS = 30_000;
+    let watchdog: ReturnType<typeof setTimeout> | null = null;
+    let stalled = false;
+    const armWatchdog = () => {
+        if (watchdog) clearTimeout(watchdog);
+        watchdog = setTimeout(() => {
+            stalled = true;
+            try { internalController.abort(); } catch { /* already aborted */ }
+        }, NO_BYTES_TIMEOUT_MS);
+    };
+    armWatchdog();
+
+    try {
+        while (true) {
+            let chunk: ReadableStreamReadResult<Uint8Array>;
+            try {
+                chunk = await reader.read();
+            } catch (readErr) {
+                if (stalled && signal && signal.aborted) {
+                    throw readErr;
+                }
+                if (stalled) {
+                    throw new Error("No data from server (timeout)");
+                }
+                throw readErr;
+            }
+            const { done, value } = chunk;
+            if (done) {
+                break;
+            }
+
+            if (value && value.byteLength > 0) {
+                armWatchdog();
+            }
+
+            buffer += decoder.decode(value, { stream: true });
+            const lines = buffer.split("\n");
+            buffer = lines.pop() || "";
+
+            for (const line of lines) {
+                processLine(line);
+            }
         }
 
-        buffer += decoder.decode(value, { stream: true });
-        const lines = buffer.split("\n");
-        buffer = lines.pop() || "";
-
-        for (const line of lines) {
-            processLine(line);
+        if (buffer) {
+            processLine(buffer);
         }
+
+        flushEvent();
+    } finally {
+        if (watchdog) clearTimeout(watchdog);
     }
 
-    if (buffer) {
-        processLine(buffer);
+    if (stalled && (!signal || !signal.aborted)) {
+        throw new Error("No data from server (timeout)");
     }
-
-    flushEvent();
 }
 
 export async function uploadPdf(file: File, options: UploadPdfOptions = {}): Promise<UploadResponse> {

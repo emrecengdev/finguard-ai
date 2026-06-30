@@ -21,41 +21,110 @@ export default function Dashboard() {
 
   useEffect(() => {
     let active = true;
+    let timer: ReturnType<typeof setTimeout> | null = null;
 
-    const refreshState = async () => {
-      const online = await healthCheck();
-      if (!active) return;
-      setIsBackendOnline(online);
+    const BASE_INTERVAL_MS = 30_000;
+    const BACKOFF_STEPS_MS = [30_000, 60_000, 120_000] as const;
+    const MAX_INTERVAL_MS = BACKOFF_STEPS_MS[BACKOFF_STEPS_MS.length - 1];
 
-      if (!online) {
-        setDocuments([]);
-        return;
-      }
-
+    type RefreshResult = "success" | "offline" | "error";
+    const refreshState = async (): Promise<RefreshResult> => {
       try {
-        const docs = await getDocuments();
-        if (active) {
-          setDocuments(docs);
-          setSelectedDocument((current) => {
-            if (!current) return current;
-            if (isSamplePreviewDocument(current)) {
-              return docs.find((doc) => doc.filename === current.filename) ?? current;
-            }
-            const nextSelected = docs.find((doc) => doc.filename === current.filename);
-            return nextSelected ?? null;
-          });
+        const online = await healthCheck();
+        if (!active) return "error";
+        setIsBackendOnline(online);
+
+        if (!online) {
+          setDocuments([]);
+          return "offline";
         }
+
+        const docs = await getDocuments();
+        if (!active) return "error";
+        setDocuments(docs);
+        setSelectedDocument((current) => {
+          if (!current) return current;
+          if (isSamplePreviewDocument(current)) {
+            return docs.find((doc) => doc.filename === current.filename) ?? current;
+          }
+          const nextSelected = docs.find((doc) => doc.filename === current.filename);
+          return nextSelected ?? null;
+        });
+        return "success";
       } catch {
         if (active) setDocuments([]);
+        return "error";
       }
     };
 
-    const interval = setInterval(refreshState, 30_000);
-    void refreshState();
+    let consecutiveFailures = 0;
+
+    const computeDelay = (failures: number) => {
+      if (failures <= 0) return BASE_INTERVAL_MS;
+      const idx = Math.min(failures - 1, BACKOFF_STEPS_MS.length - 1);
+      return BACKOFF_STEPS_MS[idx] ?? MAX_INTERVAL_MS;
+    };
+
+    const scheduleNext = () => {
+      if (!active) return;
+      if (typeof document !== "undefined" && document.hidden) {
+        return;
+      }
+      const delay = computeDelay(consecutiveFailures);
+      timer = setTimeout(async () => {
+        if (!active) return;
+        const result = await refreshState();
+        if (!active) return;
+        if (result === "success") {
+          consecutiveFailures = 0;
+        } else if (result === "error") {
+          consecutiveFailures += 1;
+        }
+        scheduleNext();
+      }, delay);
+    };
+
+    const onVisibilityChange = () => {
+      if (typeof document === "undefined") return;
+      if (document.hidden) {
+        if (timer) {
+          clearTimeout(timer);
+          timer = null;
+        }
+        return;
+      }
+      if (timer) {
+        clearTimeout(timer);
+        timer = null;
+      }
+      consecutiveFailures = 0;
+      void (async () => {
+        if (!active) return;
+        const result = await refreshState();
+        if (!active) return;
+        if (result === "error") consecutiveFailures += 1;
+        scheduleNext();
+      })();
+    };
+
+    if (typeof document !== "undefined") {
+      document.addEventListener("visibilitychange", onVisibilityChange);
+    }
+
+    void (async () => {
+      if (!active) return;
+      const result = await refreshState();
+      if (!active) return;
+      if (result === "error") consecutiveFailures += 1;
+      scheduleNext();
+    })();
 
     return () => {
       active = false;
-      clearInterval(interval);
+      if (timer) clearTimeout(timer);
+      if (typeof document !== "undefined") {
+        document.removeEventListener("visibilitychange", onVisibilityChange);
+      }
     };
   }, []);
 

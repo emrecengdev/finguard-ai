@@ -17,6 +17,7 @@ import {
   Sparkles,
   Mic,
   ArrowUp,
+  Square,
   Volume2,
   VolumeX,
   Network,
@@ -237,6 +238,7 @@ export function Chat({ documents }: ChatProps) {
   const [isLoading, setIsLoading] = useState(false);
   const scrollRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
+  const streamAbortRef = useRef<AbortController | null>(null);
   const { speakingMsgId, isListening, canListen, speakText, stopSpeaking, startListening, stopListening } = useVoice();
 
   useEffect(() => {
@@ -268,6 +270,10 @@ export function Chat({ documents }: ChatProps) {
     URL.revokeObjectURL(url);
   }, [messages]);
 
+  const stopStream = useCallback(() => {
+    streamAbortRef.current?.abort();
+  }, []);
+
   const handleSend = useCallback(async () => {
     const trimmed = input.trim();
     if (!trimmed || isLoading) return;
@@ -293,6 +299,8 @@ export function Chat({ documents }: ChatProps) {
     setInput("");
     setIsLoading(true);
 
+    const controller = new AbortController();
+    streamAbortRef.current = controller;
     try {
       await streamMessage(
         trimmed,
@@ -334,21 +342,38 @@ export function Chat({ documents }: ChatProps) {
                 : m
             )
           );
-        }
+        },
+        controller.signal,
       );
     } catch (err) {
-      setMessages((prev) =>
-        prev.map((m) =>
-          m.id === asstId
-            ? {
-              ...m,
-              content: `${t("chat.error_prefix", locale)}: ${err instanceof Error ? err.message : t("chat.error_generic", locale)}`,
-              isLoading: false,
-            }
-            : m
-        )
-      );
+      if (controller.signal.aborted) {
+        setMessages((prev) =>
+          prev.map((m) =>
+            m.id === asstId
+              ? { ...m, content: t("chat.stopped", locale), isLoading: false }
+              : m
+          )
+        );
+      } else {
+        setMessages((prev) =>
+          prev.map((m) =>
+            m.id === asstId
+              ? {
+                ...m,
+                content: `${t("chat.error_prefix", locale)}: ${err instanceof Error ? err.message : t("chat.error_generic", locale)}`,
+                isLoading: false,
+              }
+              : m
+          )
+        );
+      }
     } finally {
+      if (!controller.signal.aborted) {
+        try { controller.abort(); } catch { /* already aborted */ }
+      }
+      if (streamAbortRef.current === controller) {
+        streamAbortRef.current = null;
+      }
       setIsLoading(false);
       inputRef.current?.focus();
     }
@@ -653,17 +678,25 @@ export function Chat({ documents }: ChatProps) {
                 </span>
               </span>
             </button>
-            <button
-              onClick={handleSend}
-              disabled={!input.trim() || isLoading}
-              className="flex size-10 items-center justify-center rounded-full bg-emerald-600 text-white shadow-[0_0_20px_rgba(16,185,129,0.25)] transition-all hover:bg-emerald-500 disabled:opacity-50 disabled:shadow-none active:scale-95"
-            >
-              {isLoading ? (
-                <Loader2 className="size-4 animate-spin" />
-              ) : (
+            {isLoading ? (
+              <button
+                type="button"
+                onClick={stopStream}
+                aria-label={t("chat.stopped", locale)}
+                title={t("chat.stopped", locale)}
+                className="flex size-10 items-center justify-center rounded-full bg-rose-500 text-white shadow-[0_0_20px_rgba(244,63,94,0.25)] transition-all hover:bg-rose-400 active:scale-95"
+              >
+                <Square size={14} strokeWidth={3} fill="currentColor" />
+              </button>
+            ) : (
+              <button
+                onClick={handleSend}
+                disabled={!input.trim()}
+                className="flex size-10 items-center justify-center rounded-full bg-emerald-600 text-white shadow-[0_0_20px_rgba(16,185,129,0.25)] transition-all hover:bg-emerald-500 disabled:opacity-50 disabled:shadow-none active:scale-95"
+              >
                 <ArrowUp size={18} strokeWidth={2.5} />
-              )}
-            </button>
+              </button>
+            )}
           </div>
 
           <div className="relative flex gap-3 pr-28 sm:pr-44">
