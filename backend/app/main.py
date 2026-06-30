@@ -579,22 +579,16 @@ async def chat_stream(
             final_state: dict | None = None
 
             while True:
-                # Detect client disconnect promptly.
-                if await request.is_disconnected():
-                    logger.info(
-                        "SSE client disconnected; cancelling pipeline (session=%s)",
-                        request_body.session_id,
-                    )
-                    cancel.set()
-                    break
-
-                # Wait for next event with a small idle window so we can
-                # re-check the disconnect flag and the future.
+                # Wait for the next event from the pipeline. Client
+                # disconnect is handled by Starlette cancelling this
+                # generator (CancelledError below) — do NOT poll
+                # request.is_disconnected(), which returns false positives
+                # once the POST request body has been fully consumed.
                 try:
-                    ev = await asyncio.wait_for(q.get(), timeout=1.0)
+                    ev = await asyncio.wait_for(q.get(), timeout=2.0)
                 except asyncio.TimeoutError:
-                    # No event yet. If the future finished without
-                    # producing a sentinel (rare race), exit the loop.
+                    # No event yet. If the future finished without emitting
+                    # a sentinel (rare race), finalize.
                     if fut.done():
                         break
                     continue
