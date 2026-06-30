@@ -170,9 +170,8 @@ def _call_llm(system_prompt: str, user_prompt: str) -> str:
                 ],
                 temperature=settings.llm_temperature,
                 max_completion_tokens=settings.llm_max_completion_tokens,
-                # MiniMax M2.x always emits <think> reasoning; reasoning_split
-                # moves it to a separate field so .content is clean (JSON for
-                # router/guardrail, answer-only for synthesizer/streaming).
+                # Model-aware reasoning control: M3 disables thinking,
+                # M2.x splits it out -> .content stays clean. See _llm_extra_body.
                 extra_body=_llm_extra_body(settings),
             )
         except Exception as exc:  # noqa: BLE001 — we classify and re-raise
