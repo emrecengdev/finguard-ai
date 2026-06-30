@@ -1138,6 +1138,16 @@ def retrieve(
     merged = sorted(content_scores.values(), key=lambda x: x["rrf_score"], reverse=True)
     candidates = merged[:top_k]
 
+    # Soft source-filter: if the hint matched nothing (e.g. the router's
+    # filename guess drifted from the actual ingested filename), retry once
+    # without it so the user gets relevant context instead of "no documents".
+    if not candidates and source_filter:
+        logger.info(
+            "source_filter=%r produced no results; retrying unfiltered",
+            source_filter,
+        )
+        return retrieve(query, top_k=top_k, top_n=top_n, source_filter=None)
+
     if not candidates:
         return []
 
