@@ -13,6 +13,7 @@ class Settings(BaseSettings):
     llm_provider: str = "minimax"
     llm_base_url: str = "https://api.minimax.io/v1"
     llm_api_key: str = ""
+    llm_api_keys: str = ""  # comma-separated multi-key pool (rate-limit rotation); falls back to llm_api_key
     llm_model: str = "MiniMax-M2.7-highspeed"
     llm_max_completion_tokens: int = 2048
     llm_temperature: float = 0.1
