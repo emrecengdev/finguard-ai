@@ -133,6 +133,20 @@ def _full_jitter_sleep(attempt_index: int) -> None:
 # ─── Non-streaming call ──────────────────────────────────────────────
 
 
+def _llm_extra_body(settings) -> dict:
+    """Provider/model-aware request extras.
+
+    MiniMax M3 can DISABLE thinking -> .content is clean (no <think>), which
+    is ideal for the JSON router/guardrail and direct synthesizer answers.
+    MiniMax M2.x cannot disable thinking, so we split it into a separate
+    field (reasoning_split) to keep .content clean. Non-MiniMax -> no extras.
+    """
+    if settings.llm_provider != "minimax":
+        return {}
+    if "M3" in (settings.llm_model or "").upper():
+        return {"thinking": {"type": "disabled"}}
+    return {"reasoning_split": True}
+
 def _call_llm(system_prompt: str, user_prompt: str) -> str:
     """Call the chat completions endpoint and return the assistant text.
 
@@ -159,7 +173,7 @@ def _call_llm(system_prompt: str, user_prompt: str) -> str:
                 # MiniMax M2.x always emits <think> reasoning; reasoning_split
                 # moves it to a separate field so .content is clean (JSON for
                 # router/guardrail, answer-only for synthesizer/streaming).
-                extra_body={"reasoning_split": True} if settings.llm_provider == "minimax" else {},
+                extra_body=_llm_extra_body(settings),
             )
         except Exception as exc:  # noqa: BLE001 — we classify and re-raise
             last_error = exc
@@ -245,7 +259,7 @@ def _call_llm_stream(
                 max_completion_tokens=settings.llm_max_completion_tokens,
                 stream=True,
                 stream_options={"include_usage": True},
-                extra_body={"reasoning_split": True} if settings.llm_provider == "minimax" else {},
+                extra_body=_llm_extra_body(settings),
             )
         except Exception as exc:  # noqa: BLE001
             status = getattr(exc, "status_code", None)
